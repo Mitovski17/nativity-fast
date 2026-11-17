@@ -1,7 +1,7 @@
 // Web build only: the daily 7:00 verse (Web Push). The phone subscribes with the app's public
 // key and its time zone; the daily-verse edge function sends when it is 7:xx there.
 import { sb } from "./cloud";
-import type { Lang } from "./i18n";
+import { getLang, type Lang } from "./i18n";
 
 const FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/daily-verse`;
 
@@ -28,7 +28,7 @@ export async function pushState(): Promise<PushState> {
   if (Notification.permission === "denied") return "denied";
   const sub = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
   if (!sub) return "off";
-  await save(sub, null).catch(() => undefined); // keeps the time zone current if the phone travelled
+  await save(sub, getLang()).catch(() => undefined); // keeps the time zone and language current
   return "on";
 }
 

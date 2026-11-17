@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { HlColor, SavedVerse } from "../lib/types";
-import { actions, getState, useStore } from "../lib/store";
-import { FASTING, NIV_CREDIT, WEB_CREDIT, bookName, loadBook, loadIndex, randomPassage, type BookInfo, type BookText, type FastingPassage } from "../lib/bible";
+import type { HlColor, SavedVerse, Translation } from "../lib/types";
+import { actions, getState, useLang, useStore } from "../lib/store";
+import { BG_CREDIT, NIV_CREDIT, WEB_CREDIT, bookName, currentTr, fastingPassages, loadBook, loadIndex, randomPassage, shortName, type BookInfo, type BookText, type FastingPassage } from "../lib/bible";
 import { IS_ARTIFACT } from "../lib/env";
 import { tr } from "../lib/i18n";
 import { Icon, Sheet, toast } from "./ui";
@@ -16,11 +16,15 @@ type View =
 
 /** Where the Bible tab was, kept while the app is open (the saved place covers restarts) */
 let lastView: View = { k: "home" };
+/** The Bible that view was in: after a language switch the tab starts from its home (book numbering differs) */
+let lastViewTr: Translation | null = null;
 /** Which testament sections are open on the Bible home */
 let openSections: Partial<Record<BookInfo["section"], boolean>> = {};
 
 const COLORS: HlColor[] = ["yellow", "green", "blue", "pink"];
-const hlKey = (book: string, chapter: number, verse: number) => `${book}.${chapter}.${verse}`;
+/** English Bible keys stay as they were ("PRO.6.11"); the Bulgarian Bible numbers some books differently, so its keys are its own */
+const hlKey = (tr: Translation, book: string, chapter: number, verse: number) => `${tr === "web" ? "" : tr + ":"}${book}.${chapter}.${verse}`;
+const textLang = (tr: Translation) => (tr === "web" ? "en" : "bg");
 
 /** "Exodus 2:3–5" / "Exodus 2:3, 7" */
 function refOf(info: Pick<BookInfo, "en" | "bg">, chapter: number, verses: number[]) {
@@ -31,28 +35,44 @@ function refOf(info: Pick<BookInfo, "en" | "bg">, chapter: number, verses: numbe
 }
 
 export function Bible() {
+  if (lastViewTr !== currentTr()) {
+    lastView = { k: "home" };
+    lastViewTr = currentTr();
+  }
   const [view, setViewState] = useState<View>(lastView);
   const setView = (v: View) => {
     lastView = v;
+    lastViewTr = currentTr();
     setViewState(v);
   };
+  const lang = useLang();
+  const bt = currentTr();
   const [index, setIndex] = useState<BookInfo[] | null>(null);
   const [err, setErr] = useState(false);
   useEffect(() => {
-    loadIndex().then(setIndex, () => setErr(true));
-  }, []);
+    // the text follows the app language: switching language switches the Bible
+    let live = true;
+    setIndex(null);
+    setErr(false);
+    loadIndex(bt).then((i) => live && setIndex(i), () => live && setErr(true));
+    return () => {
+      live = false;
+    };
+  }, [lang]);
   useEffect(() => {
     window.scrollTo({ top: 0 });
   }, [view.k, view.k === "read" ? `${view.code}${view.chapter}` : view.k === "folder" ? view.id : ""]);
 
   const s = useStore();
-  const saved = s.profile.bible;
+  const saved = (s.profile.bible?.tr ?? "web") === bt ? s.profile.bible : undefined;
   const book = (code: string) => index?.find((b) => b.code === code);
-  if (view.k === "read" && index && book(view.code)) {
+  const readBook = view.k === "read" ? book(view.code) : undefined;
+  if (view.k === "read" && readBook && view.chapter <= readBook.chapters) {
     // coming back to the chapter you were reading: start where you left off
     const verse = view.verse ?? (saved?.book === view.code && saved.chapter === view.chapter ? saved.verse : undefined);
-    return <Reader key={`${view.code}-${view.chapter}`} info={book(view.code)!} chapter={view.chapter} verse={verse} go={setView} />;
+    return <Reader key={`${bt}-${view.code}-${view.chapter}`} bt={bt} info={readBook} chapter={view.chapter} verse={verse} go={setView} />;
   }
+  if (view.k === "read" && readBook) return <Chapters info={readBook} go={setView} />;
   if (view.k === "book" && index && book(view.code)) return <Chapters info={book(view.code)!} go={setView} />;
   if (view.k === "folder" && index) return <FolderView id={view.id} index={index} go={setView} />;
   return <BibleHome index={index} err={err} go={setView} />;
@@ -62,11 +82,12 @@ export function Bible() {
 
 function BibleHome({ index, err, go }: { index: BookInfo[] | null; err: boolean; go: (v: View) => void }) {
   const s = useStore();
-  const last = s.profile.bible;
-  const lastBook = last && index?.find((b) => b.code === last.book);
+  const bt = currentTr();
+  const last = (s.profile.bible?.tr ?? "web") === bt ? s.profile.bible : undefined;
+  const lastBook = last && index?.find((b) => b.code === last.book && last.chapter <= b.chapters);
   const [open, setOpen] = useState(openSections);
   const toggle = (sec: BookInfo["section"]) => {
-    openSections = { ...open, [sec]: !open[sec] };
+    openSections = { ...openSections, [sec]: !openSections[sec] };
     setOpen(openSections);
   };
   const sections: [BookInfo["section"], string][] = [
@@ -131,7 +152,7 @@ function BibleHome({ index, err, go }: { index: BookInfo[] | null; err: boolean;
 
       <SavedFolders go={go} />
 
-      <VerseCard go={go} />
+      <VerseCard key={bt} go={go} />
 
       {DailyVerseRow && (
         <Suspense fallback={null}>
@@ -140,9 +161,15 @@ function BibleHome({ index, err, go }: { index: BookInfo[] | null; err: boolean;
       )}
 
       <div className="tiny faint" style={{ textAlign: "center", paddingInline: 8, lineHeight: 1.5 }}>
-        {tr("Текст на Библията", "Bible text")}: {WEB_CREDIT}.
-        <br />
-        {tr("Стиховете за поста", "Fasting verses")}: {NIV_CREDIT}
+        {bt === "web" ? (
+          <>
+            Bible text: {WEB_CREDIT}.
+            <br />
+            Fasting verses: {NIV_CREDIT}
+          </>
+        ) : (
+          <>Текст на Библията и стиховете за поста: {BG_CREDIT}.</>
+        )}
       </div>
     </div>
   );
@@ -201,8 +228,8 @@ function VerseCard({ go }: { go: (v: View) => void }) {
     <section className="card pad verse-card">
       {p ? (
         <>
-          <div className="eyebrow">{p.ref} · NIV</div>
-          <blockquote className="verse-text">
+          <div className="eyebrow">{p.ref}{currentTr() === "web" ? " · NIV" : ""}</div>
+          <blockquote className="verse-text" lang={textLang(currentTr())}>
             {p.verses.map((v) => (
               <span key={v.n}>
                 <sup>{v.n}</sup>
@@ -221,7 +248,7 @@ function VerseCard({ go }: { go: (v: View) => void }) {
         </>
       ) : (
         <>
-          <div className="eyebrow">{tr(`${FASTING.length} стиха за поста`, `${FASTING.length} passages on fasting`)}</div>
+          <div className="eyebrow">{tr(`${fastingPassages().length} откъса за поста`, `${fastingPassages().length} passages on fasting`)}</div>
           <p className="display verse-invite">{tr("Вземи си стих за днес", "Take a verse for today")}</p>
           <button className="btn primary block" onClick={() => setP(randomPassage())}>
             <Icon name="sparkle" size={18} /> {tr("Дай ми стих", "Get a verse")}
@@ -238,6 +265,14 @@ function FolderView({ id, index, go }: { id: string; index: BookInfo[]; go: (v: 
   const { bible } = useStore();
   const folder = bible.folders.find((f) => f.id === id);
   const [confirm, setConfirm] = useState(false);
+  const bt = currentTr();
+  // book names for verses saved from the other language's Bible
+  const [otherIndex, setOtherIndex] = useState<BookInfo[] | null>(null);
+  const other: Translation = bt === "web" ? "bg" : "web";
+  const needsOther = bible.saved.some((v) => v.folderId === id && (v.tr ?? "web") === other && !v.ref);
+  useEffect(() => {
+    if (needsOther) loadIndex(other).then(setOtherIndex, () => undefined);
+  }, [needsOther, other]);
   if (!folder) return <BibleHome index={index} err={false} go={go} />;
   const items = bible.saved.filter((v) => v.folderId === id);
   const info = (code: string) => index.find((b) => b.code === code);
@@ -248,7 +283,7 @@ function FolderView({ id, index, go }: { id: string; index: BookInfo[]; go: (v: 
           <Icon name="left" size={22} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="eyebrow">{tr(`Папка · ${items.length} стиха`, `Folder · ${items.length} saved`)}</div>
+          <div className="eyebrow">{tr(`Папка · ${items.length} ${items.length === 1 ? "стих" : "стиха"}`, `Folder · ${items.length} saved`)}</div>
           <input
             className="h1 plan-title"
             value={folder.name}
@@ -260,18 +295,26 @@ function FolderView({ id, index, go }: { id: string; index: BookInfo[]; go: (v: 
       </header>
       {items.length === 0 && <div className="note">{tr("Още няма стихове тук. Докосни стих, докато четеш, и избери „Запази“.", "No verses here yet. Tap a verse while reading and choose “Save”.")}</div>}
       {items.map((v) => {
-        const b = info(v.book);
+        const vt = v.tr ?? "web";
+        // a verse saved from the other language's Bible keeps its own reference; it opens only in that Bible
+        const b = vt === bt ? info(v.book) : undefined;
+        const ob = !b && !v.ref ? otherIndex?.find((x) => x.code === v.book) : undefined;
+        const ref = b ? refOf(b, v.chapter, v.verses) : v.ref ?? (ob ? refOf(ob, v.chapter, v.verses) : `${v.book} ${v.chapter}:${v.verses.join(", ")}`);
         return (
           <article key={v.id} className="card pad saved-verse">
             <div className="sec-head" style={{ padding: 0 }}>
-              <button className="eyebrow saved-ref" onClick={() => go({ k: "read", code: v.book, chapter: v.chapter, verse: v.verses[0] })}>
-                {b ? refOf(b, v.chapter, v.verses) : v.book} <Icon name="right" size={12} />
-              </button>
+              {b ? (
+                <button className="eyebrow saved-ref" onClick={() => go({ k: "read", code: v.book, chapter: v.chapter, verse: v.verses[0] })}>
+                  {ref} <Icon name="right" size={12} />
+                </button>
+              ) : (
+                <span className="eyebrow">{ref} · {shortName(vt)}</span>
+              )}
               <button className="icon-btn" onClick={() => actions.removeSaved(v.id)} aria-label={tr("Премахни от папката", "Remove from folder")}>
                 <Icon name="x" size={16} />
               </button>
             </div>
-            <p className="verse-text" lang="en" style={{ fontSize: 17 }}>{v.text}</p>
+            <p className="verse-text" lang={textLang(vt)} style={{ fontSize: 17 }}>{v.text}</p>
           </article>
         );
       })}
@@ -325,7 +368,7 @@ function Chapters({ info, go }: { info: BookInfo; go: (v: View) => void }) {
 /* ───────── reading a chapter ───────── */
 
 /** Remounted per chapter (key); the starting verse is fixed for the visit so saving the place doesn't move the page */
-function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chapter: number; verse?: number; go: (v: View) => void }) {
+function Reader({ bt, info, chapter, verse: startVerse, go }: { bt: Translation; info: BookInfo; chapter: number; verse?: number; go: (v: View) => void }) {
   const { bible } = useStore();
   const [verse] = useState(startVerse);
   const [text, setText] = useState<BookText | null>(null);
@@ -338,16 +381,16 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
 
   useEffect(() => {
     let live = true;
-    loadBook(info.code).then((t) => live && setText(t), () => live && setErr(true));
+    loadBook(info.code, bt).then((t) => live && setText(t), () => live && setErr(true));
     return () => {
       live = false;
     };
-  }, [info.code]);
+  }, [info.code, bt]);
 
   // Remember the place: book and chapter at once, the verse at the top of the screen as you scroll
   useEffect(() => {
-    actions.updateProfile({ bible: { book: info.code, chapter, verse } });
-  }, [info.code, chapter, verse]);
+    actions.updateProfile({ bible: { book: info.code, chapter, verse, tr: bt } });
+  }, [info.code, chapter, verse, bt]);
 
   const verses = text?.chapters[chapter - 1] ?? null;
 
@@ -374,7 +417,7 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
         for (const el of els) {
           if (el.getBoundingClientRect().bottom > 12) {
             const v = Number(el.dataset.v);
-            actions.updateProfile({ bible: { book: info.code, chapter, verse: v > 1 ? v : undefined } });
+            actions.updateProfile({ bible: { book: info.code, chapter, verse: v > 1 ? v : undefined, tr: bt } });
             break;
           }
         }
@@ -385,13 +428,13 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
       clearTimeout(timer);
       window.removeEventListener("scroll", onScroll);
     };
-  }, [verses, info.code, chapter]);
+  }, [verses, info.code, chapter, bt]);
 
   const prev = chapter > 1 ? chapter - 1 : null;
   const next = chapter < info.chapters ? chapter + 1 : null;
   const title = `${bookName(info)} ${chapter}`;
   const toggleVerse = (n: number) => setSelected((sel) => (sel.includes(n) ? sel.filter((x) => x !== n) : [...sel, n]));
-  const selKeys = selected.map((n) => hlKey(info.code, chapter, n));
+  const selKeys = selected.map((n) => hlKey(bt, info.code, chapter, n));
   const selText = () =>
     (verses ?? [])
       .filter(([n]) => selected.includes(n))
@@ -418,9 +461,9 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
         </div>
       )}
       {verses && (
-        <div className="scripture" ref={body} lang="en">
+        <div className="scripture" ref={body} lang={textLang(bt)}>
           {verses.map(([n, t]) => {
-            const hl = bible.highlights[hlKey(info.code, chapter, n)];
+            const hl = bible.highlights[hlKey(bt, info.code, chapter, n)];
             const cls = [hl ? `hl-${hl}` : "", selected.includes(n) ? "sel" : "", !hl && verse === n ? "here" : ""].filter(Boolean).join(" ");
             return (
               <span key={n} data-v={n} className={cls || undefined} onClick={() => toggleVerse(n)}>
@@ -437,7 +480,7 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
           <button className="btn ghost" disabled={!prev} onClick={() => prev && go({ k: "read", code: info.code, chapter: prev })}>
             <Icon name="left" size={18} /> {prev ?? ""}
           </button>
-          <span className="tiny faint">{WEB_CREDIT.split(" (")[0]}</span>
+          <span className="tiny faint">{bt === "web" ? WEB_CREDIT.split(" (")[0] : shortName(bt)}</span>
           <button className="btn primary" disabled={!next} onClick={() => next && go({ k: "read", code: info.code, chapter: next })}>
             {next ?? ""} <Icon name="right" size={18} />
           </button>
@@ -463,7 +506,7 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
             <button
               className="tool-btn"
               onClick={() => {
-                navigator.clipboard?.writeText(`${selText()} — ${refOf(info, chapter, selected)} (WEB)`).then(
+                navigator.clipboard?.writeText(`${selText()} — ${refOf(info, chapter, selected)} (${shortName(bt)})`).then(
                   () => toast(tr("Копирано", "Copied")),
                   () => toast(tr("Не можах да копирам", "Couldn't copy")),
                 );
@@ -506,7 +549,7 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
         <SaveSheet
           onClose={() => setSaving(false)}
           onSave={(folderId) => {
-            actions.saveVerses({ folderId, book: info.code, chapter, verses: [...selected].sort((a, b) => a - b), text: selText() });
+            actions.saveVerses({ folderId, book: info.code, chapter, verses: [...selected].sort((a, b) => a - b), text: selText(), tr: bt, ref: refOf(info, chapter, selected) });
             const f = getState().bible.folders.find((x) => x.id === folderId);
             toast(tr(`Запазено в „${f?.name}“`, `Saved to “${f?.name}”`));
             setSaving(false);

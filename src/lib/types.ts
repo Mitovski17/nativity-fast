@@ -79,12 +79,14 @@ export interface Profile {
   /** id of the plan that fills the days; null = manual tracking (no plan) */
   activePlan?: string | null;
   /** where the Bible reader was left */
-  bible?: { book: string; chapter: number; verse?: number };
+  bible?: { book: string; chapter: number; verse?: number; tr?: Translation };
   /** UI language; missing on profiles made before the English version */
   lang?: "bg" | "en";
 }
 
 export type HlColor = "yellow" | "green" | "blue" | "pink";
+/** Bible text: World English Bible (English app) or the Bulgarian Synodal Bible (Bulgarian app); missing = "web" */
+export type Translation = "web" | "bg";
 export interface VerseFolder {
   id: string;
   name: string;
@@ -98,9 +100,12 @@ export interface SavedVerse {
   verses: number[];
   /** the words as they were saved, so a folder opens without loading the book */
   text: string;
+  /** which Bible it came from, and its reference in that Bible's book names */
+  tr?: Translation;
+  ref?: string;
   createdAt: number;
 }
-/** Highlights ("PRO.6.11" → colour) and saved verses in folders */
+/** Highlights ("PRO.6.11" in the English Bible, "bg:PRO.6.11" in the Bulgarian one → colour) and saved verses in folders */
 export interface BibleNotes {
   highlights: Record<string, HlColor>;
   folders: VerseFolder[];

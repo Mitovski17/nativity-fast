@@ -6,6 +6,7 @@ import webpush from "npm:web-push@3.6.7";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { SECRET_KEY, SUPABASE_URL, caller, cors, json } from "../_shared/auth.ts";
 import { VERSES } from "./verses.ts";
+import { VERSES_BG } from "./verses-bg.ts";
 
 const admin = createClient(SUPABASE_URL, SECRET_KEY!, { auth: { persistSession: false, autoRefreshToken: false } });
 
@@ -40,14 +41,15 @@ async function config(): Promise<Config> {
   return cached;
 }
 
-/** Same verse for everyone on a given day, cycling through the list */
-function verseFor(day: string) {
+/** Same verse for everyone on a given day, cycling through the list (both lists are in the same order) */
+function verseFor(day: string, lang: string) {
+  const list = lang === "en" ? VERSES : VERSES_BG;
   const n = Math.floor(Date.parse(`${day}T00:00:00Z`) / 86_400_000);
-  return VERSES[((n % VERSES.length) + VERSES.length) % VERSES.length];
+  return list[((n % list.length) + list.length) % list.length];
 }
 
 function message(lang: string, day: string) {
-  const v = verseFor(day);
+  const v = verseFor(day, lang);
   return JSON.stringify({
     title: lang === "en" ? "Verse for the fast" : "Стих за поста",
     body: `${v.t} — ${v.ref}`,
