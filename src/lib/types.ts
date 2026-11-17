@@ -78,6 +78,8 @@ export interface Profile {
   planIsExample: boolean;
   /** id of the plan that fills the days; null = manual tracking (no plan) */
   activePlan?: string | null;
+  /** where the Bible reader was left */
+  bible?: { book: string; chapter: number; verse?: number };
   /** UI language; missing on profiles made before the English version */
   lang?: "bg" | "en";
 }

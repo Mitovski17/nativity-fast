@@ -3,6 +3,7 @@ import { Home } from "./components/Home";
 import { Plan } from "./components/Plan";
 import { Library } from "./components/Library";
 import { Profile } from "./components/Profile";
+import { Bible } from "./components/Bible";
 import { SheetCtx, SheetHost, type SheetState } from "./components/sheets";
 import { Icon, ToastHost } from "./components/ui";
 import { dayView, getState, initCloud, mealOrder, useLang } from "./lib/store";
@@ -10,8 +11,9 @@ import { defaultMeals } from "./lib/seed";
 import { tr } from "./lib/i18n";
 import { todayISO } from "./lib/fast";
 
-type Tab = "today" | "plan" | "library" | "profile";
-const TABS: Tab[] = ["today", "plan", "library", "profile"];
+type Tab = "today" | "plan" | "library" | "bible" | "profile";
+/** profile is not in the tab bar; it opens from the avatar on Today */
+const TABS: Tab[] = ["today", "plan", "library", "bible", "profile"];
 const fromHash = (): Tab => {
   const h = location.hash.replace("#", "") as Tab;
   return TABS.includes(h) ? h : "today";
@@ -55,16 +57,17 @@ export default function App() {
     ["today", "home", tr("Днес", "Today")],
     ["plan", "list", tr("План", "Plan")],
     ["library", "book", tr("Храни", "Foods")],
-    ["profile", "user", tr("Профил", "Profile")],
+    ["bible", "bible", tr("Библия", "Bible")],
   ];
 
   return (
     <SheetCtx.Provider value={open} key={lang}>
       <main className="app">
-        {tab === "today" && <Home date={date} setDate={setDate} />}
+        {tab === "today" && <Home date={date} setDate={setDate} onProfile={() => setTab("profile")} />}
         {tab === "plan" && <Plan />}
         {tab === "library" && <Library />}
-        {tab === "profile" && <Profile />}
+        {tab === "profile" && <Profile onBack={() => setTab("today")} />}
+        {tab === "bible" && <Bible />}
       </main>
       <nav className="tabbar" aria-label={tr("Основна навигация", "Main navigation")}>
         <div className="tabbar-in">

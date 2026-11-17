@@ -10,3 +10,4 @@ dist-artifact
 .vercel
 .env*
 .claude
+*.pdf

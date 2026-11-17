@@ -27,6 +27,8 @@ function setAccount(a: typeof account) {
 
 export async function signOut(forget = false) {
   await flushNow().catch(() => undefined);
+  // this phone stops getting the daily verse for this account
+  await import("../lib/push").then((m) => m.forgetThisDevice()).catch(() => undefined);
   await sb.auth.signOut();
   closeUser(forget);
   setAccount(null);

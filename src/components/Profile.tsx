@@ -18,7 +18,7 @@ const syncText = (s: string) =>
     error: tr("Облакът не отговаря. Промените са запазени тук и ще се качат по-късно.", "The cloud isn't responding. Changes are saved here and will upload later."),
   } as Record<string, string>)[s] ?? "";
 
-export function Profile() {
+export function Profile({ onBack }: { onBack: () => void }) {
   const s = useStore();
   const sync = useSyncStatus();
   const open = useSheet();
@@ -38,8 +38,11 @@ export function Profile() {
 
   return (
     <div className="screen">
-      <header className="topbar">
-        <div>
+      <header className="topbar" style={{ alignItems: "center" }}>
+        <button className="icon-btn" onClick={onBack} aria-label={tr("Назад към Днес", "Back to Today")} style={{ marginLeft: -8 }}>
+          <Icon name="left" size={22} />
+        </button>
+        <div style={{ flex: 1 }}>
           <div className="eyebrow">{tr("Настройки", "Settings")}</div>
           <h1 className="h1">{p.name ? p.name : tr("Профил", "Profile")}</h1>
         </div>

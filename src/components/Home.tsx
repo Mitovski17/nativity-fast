@@ -132,7 +132,7 @@ function DayCard({ date }: { date: string }) {
   );
 }
 
-export function Home({ date, setDate }: { date: string; setDate: (d: string) => void }) {
+export function Home({ date, setDate, onProfile }: { date: string; setDate: (d: string) => void; onProfile: () => void }) {
   const s = useStore();
   const open = useSheet();
   const { entries, type } = dayView(s, date);
@@ -146,7 +146,10 @@ export function Home({ date, setDate }: { date: string; setDate: (d: string) => 
   return (
     <div className="screen">
       <header className="topbar">
-        <div>
+        <button className="avatar" onClick={onProfile} aria-label={tr("Профил и настройки", "Profile and settings")}>
+          {s.profile.name.trim() ? s.profile.name.trim()[0].toUpperCase() : <Icon name="user" size={20} />}
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div className="eyebrow">{longDate(date)}</div>
           <h1 className="h1">{relTitle(date)}</h1>
         </div>
