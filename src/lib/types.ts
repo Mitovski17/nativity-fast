@@ -84,12 +84,36 @@ export interface Profile {
   lang?: "bg" | "en";
 }
 
+export type HlColor = "yellow" | "green" | "blue" | "pink";
+export interface VerseFolder {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+export interface SavedVerse {
+  id: string;
+  folderId: string;
+  book: string;
+  chapter: number;
+  verses: number[];
+  /** the words as they were saved, so a folder opens without loading the book */
+  text: string;
+  createdAt: number;
+}
+/** Highlights ("PRO.6.11" → colour) and saved verses in folders */
+export interface BibleNotes {
+  highlights: Record<string, HlColor>;
+  folders: VerseFolder[];
+  saved: SavedVerse[];
+}
+
 export interface State {
   v: 1;
   profile: Profile;
   foods: Record<string, Food>;
   plans: Record<string, MealPlan>;
   days: Record<string, Day>;
+  bible: BibleNotes;
 }
 
 export type Target =

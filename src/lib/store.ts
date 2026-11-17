@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { Day, DayType, Entry, Food, Item, Meal, MealPlan, PlanType, Plans, Profile, State } from "./types";
+import type { Day, DayType, Entry, Food, HlColor, Item, Meal, MealPlan, PlanType, Plans, Profile, SavedVerse, State } from "./types";
 import { defaultMeals, initialState, migrate, relocalize } from "./seed";
 import { detectLang, getLang, setLang, type Lang } from "./i18n";
 import { dayType } from "./fast";
@@ -114,6 +114,7 @@ function markDirty(prev: State, next: State) {
   if (prev.profile !== next.profile) dirty.add("profile");
   if (prev.plans !== next.plans) dirty.add("plans");
   if (prev.foods !== next.foods) dirty.add("library");
+  if (prev.bible !== next.bible) dirty.add("bible");
   if (prev.days !== next.days) {
     const keys = new Set([...Object.keys(prev.days), ...Object.keys(next.days)]);
     keys.forEach((d) => {
@@ -127,6 +128,7 @@ function body(key: string): Record<string, unknown> {
   if (key === "profile") return { profile: state.profile };
   if (key === "plans") return { plans: state.plans };
   if (key === "library") return { foods: state.foods };
+  if (key === "bible") return { bible: state.bible };
   const month = key.slice(4);
   const days: Record<string, Day> = {};
   for (const [d, v] of Object.entries(state.days)) if (d.startsWith(month)) days[d] = v;
@@ -187,6 +189,7 @@ function applyRemote(docs: { key: string; data: Record<string, unknown> }[]) {
     if (d.key === "profile" && data.profile) next.profile = { ...state.profile, lang: "bg", ...data.profile };
     else if (d.key === "plans" && data.plans) next.plans = data.plans;
     else if (d.key === "library" && data.foods) next.foods = data.foods;
+    else if (d.key === "bible" && data.bible) next.bible = data.bible;
     else if (d.key.startsWith("log-") && data.days) Object.assign(remoteDays, data.days);
   }
   next.days = { ...state.days, ...remoteDays };
@@ -204,7 +207,7 @@ async function startSync(r: Remote) {
     const docs = await r.load();
     if (remote !== r) return;
     if (!docs.length) {
-      ["profile", "plans", "library"].forEach((k) => dirty.add(k));
+      ["profile", "plans", "library", "bible"].forEach((k) => dirty.add(k));
       Object.keys(state.days).forEach((d) => dirty.add("log-" + d.slice(0, 7)));
     } else applyRemote(docs);
     lastPull = Date.now();
@@ -407,6 +410,36 @@ export const actions = {
   },
   removePlanItem(planId: string, plan: PlanType, id: string) {
     actions.editPlan(planId, plan, (ms) => ms.map((m) => ({ ...m, items: m.items.filter((i) => i.id !== id) })));
+  },
+
+  /* Bible notes */
+  setHighlight(keys: string[], color: HlColor | null) {
+    setState((s) => {
+      const highlights = { ...s.bible.highlights };
+      for (const k of keys) {
+        if (color) highlights[k] = color;
+        else delete highlights[k];
+      }
+      return { ...s, bible: { ...s.bible, highlights } };
+    });
+  },
+  addFolder(name: string): string {
+    const id = uid();
+    setState((s) => ({ ...s, bible: { ...s.bible, folders: [...s.bible.folders, { id, name: name.trim(), createdAt: Date.now() }] } }));
+    return id;
+  },
+  renameFolder(id: string, name: string) {
+    setState((s) => ({ ...s, bible: { ...s.bible, folders: s.bible.folders.map((f) => (f.id === id ? { ...f, name } : f)) } }));
+  },
+  /** removes the folder and the verses saved in it */
+  deleteFolder(id: string) {
+    setState((s) => ({ ...s, bible: { ...s.bible, folders: s.bible.folders.filter((f) => f.id !== id), saved: s.bible.saved.filter((v) => v.folderId !== id) } }));
+  },
+  saveVerses(v: Omit<SavedVerse, "id" | "createdAt">) {
+    setState((s) => ({ ...s, bible: { ...s.bible, saved: [{ ...v, id: uid(), createdAt: Date.now() }, ...s.bible.saved] } }));
+  },
+  removeSaved(id: string) {
+    setState((s) => ({ ...s, bible: { ...s.bible, saved: s.bible.saved.filter((v) => v.id !== id) } }));
   },
 
   /* library */

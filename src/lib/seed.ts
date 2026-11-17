@@ -1,4 +1,4 @@
-import type { Food, Item, Kind, Meal, MealPlan, Plans, Profile, State, Unit } from "./types";
+import type { BibleNotes, Food, Item, Kind, Meal, MealPlan, Plans, Profile, State, Unit } from "./types";
 import { itemFromFood, uid } from "./nutrition";
 import { getLang, type Lang } from "./i18n";
 import { dbById } from "./foodsdb";
@@ -96,12 +96,13 @@ export function defaultProfile(): Profile {
 }
 
 export const EXAMPLE_PLAN_ID = "example";
+export const emptyBible = (): BibleNotes => ({ highlights: {}, folders: [], saved: [] });
 const EXAMPLE_NAMES: Record<Lang, string> = { bg: "Примерен план", en: "Example plan" };
 
 export function initialState(): State {
   const foods = seedFoods();
   const example: MealPlan = { id: EXAMPLE_PLAN_ID, name: EXAMPLE_NAMES[getLang()], days: seedPlans(foods), example: true, createdAt: Date.now() };
-  return { v: 1, profile: { ...defaultProfile(), activePlan: EXAMPLE_PLAN_ID }, foods, plans: { [EXAMPLE_PLAN_ID]: example }, days: {} };
+  return { v: 1, profile: { ...defaultProfile(), activePlan: EXAMPLE_PLAN_ID }, foods, plans: { [EXAMPLE_PLAN_ID]: example }, days: {}, bible: emptyBible() };
 }
 
 /**
@@ -123,6 +124,7 @@ export function migrate(s: State): State {
     };
     next = { ...s, plans: { [plan.id]: plan }, profile: { ...s.profile, activePlan: plan.id } };
   }
+  if (!next.bible) next = { ...next, bible: emptyBible() };
   if (next.profile.activePlan === undefined) {
     next = { ...next, profile: { ...next.profile, activePlan: Object.keys(next.plans)[0] ?? null } };
   }

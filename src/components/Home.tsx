@@ -146,9 +146,6 @@ export function Home({ date, setDate, onProfile }: { date: string; setDate: (d: 
   return (
     <div className="screen">
       <header className="topbar">
-        <button className="avatar" onClick={onProfile} aria-label={tr("Профил и настройки", "Profile and settings")}>
-          {s.profile.name.trim() ? s.profile.name.trim()[0].toUpperCase() : <Icon name="user" size={20} />}
-        </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="eyebrow">{longDate(date)}</div>
           <h1 className="h1">{relTitle(date)}</h1>
@@ -156,6 +153,9 @@ export function Home({ date, setDate, onProfile }: { date: string; setDate: (d: 
         {date !== today && (
           <button className="pill light" onClick={() => setDate(today)}>{tr("Днес", "Today")}</button>
         )}
+        <button className="avatar" onClick={onProfile} aria-label={tr("Профил и настройки", "Profile and settings")}>
+          {s.profile.name.trim() ? s.profile.name.trim()[0].toUpperCase() : <Icon name="user" size={20} />}
+        </button>
       </header>
 
       <Calendar key={date.slice(0, 7)} date={date} setDate={setDate} />

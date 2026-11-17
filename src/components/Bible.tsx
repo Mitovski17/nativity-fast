@@ -1,16 +1,34 @@
-import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { actions, useStore } from "../lib/store";
+import { Suspense, lazy, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { HlColor, SavedVerse } from "../lib/types";
+import { actions, getState, useStore } from "../lib/store";
 import { FASTING, NIV_CREDIT, WEB_CREDIT, bookName, loadBook, loadIndex, randomPassage, type BookInfo, type BookText, type FastingPassage } from "../lib/bible";
 import { IS_ARTIFACT } from "../lib/env";
 import { tr } from "../lib/i18n";
-import { Icon } from "./ui";
+import { Icon, Sheet, toast } from "./ui";
 
 const DailyVerseRow = IS_ARTIFACT ? null : lazy(() => import("./DailyVerse"));
 
-type View = { k: "home" } | { k: "book"; code: string } | { k: "read"; code: string; chapter: number; verse?: number };
+type View =
+  | { k: "home" }
+  | { k: "book"; code: string }
+  | { k: "read"; code: string; chapter: number; verse?: number }
+  | { k: "folder"; id: string };
 
 /** Where the Bible tab was, kept while the app is open (the saved place covers restarts) */
 let lastView: View = { k: "home" };
+/** Which testament sections are open on the Bible home */
+let openSections: Partial<Record<BookInfo["section"], boolean>> = {};
+
+const COLORS: HlColor[] = ["yellow", "green", "blue", "pink"];
+const hlKey = (book: string, chapter: number, verse: number) => `${book}.${chapter}.${verse}`;
+
+/** "Exodus 2:3–5" / "Exodus 2:3, 7" */
+function refOf(info: Pick<BookInfo, "en" | "bg">, chapter: number, verses: number[]) {
+  const v = [...verses].sort((a, b) => a - b);
+  const contiguous = v.every((n, i) => i === 0 || n === v[i - 1] + 1);
+  const part = v.length === 1 ? `${v[0]}` : contiguous ? `${v[0]}–${v[v.length - 1]}` : v.join(", ");
+  return `${bookName(info)} ${chapter}:${part}`;
+}
 
 export function Bible() {
   const [view, setViewState] = useState<View>(lastView);
@@ -25,28 +43,35 @@ export function Bible() {
   }, []);
   useEffect(() => {
     window.scrollTo({ top: 0 });
-  }, [view.k, view.k === "read" ? `${view.code}${view.chapter}` : ""]);
+  }, [view.k, view.k === "read" ? `${view.code}${view.chapter}` : view.k === "folder" ? view.id : ""]);
 
-  const saved = useStore().profile.bible;
+  const s = useStore();
+  const saved = s.profile.bible;
   const book = (code: string) => index?.find((b) => b.code === code);
-  if (view.k === "read" && index) {
+  if (view.k === "read" && index && book(view.code)) {
     // coming back to the chapter you were reading: start where you left off
     const verse = view.verse ?? (saved?.book === view.code && saved.chapter === view.chapter ? saved.verse : undefined);
     return <Reader key={`${view.code}-${view.chapter}`} info={book(view.code)!} chapter={view.chapter} verse={verse} go={setView} />;
   }
-  if (view.k === "book" && index) return <Chapters info={book(view.code)!} go={setView} />;
+  if (view.k === "book" && index && book(view.code)) return <Chapters info={book(view.code)!} go={setView} />;
+  if (view.k === "folder" && index) return <FolderView id={view.id} index={index} go={setView} />;
   return <BibleHome index={index} err={err} go={setView} />;
 }
 
-/* ───────── home: verse for the fast, continue reading, books ───────── */
+/* ───────── home: continue, verse for the fast, saved verses, the three sections ───────── */
 
 function BibleHome({ index, err, go }: { index: BookInfo[] | null; err: boolean; go: (v: View) => void }) {
   const s = useStore();
   const last = s.profile.bible;
   const lastBook = last && index?.find((b) => b.code === last.book);
+  const [open, setOpen] = useState(openSections);
+  const toggle = (sec: BookInfo["section"]) => {
+    openSections = { ...open, [sec]: !open[sec] };
+    setOpen(openSections);
+  };
   const sections: [BookInfo["section"], string][] = [
     ["ot", tr("Стар завет", "Old Testament")],
-    ["dc", tr("Второканонични книги", "Deuterocanonical books")],
+    ["dc", tr("Второканонични", "Deuterocanonical")],
     ["nt", tr("Нов завет", "New Testament")],
   ];
   return (
@@ -69,6 +94,43 @@ function BibleHome({ index, err, go }: { index: BookInfo[] | null; err: boolean;
         </button>
       ) : null}
 
+      {err && <div className="note warn">{tr("Библията не се зареди. Провери връзката и отвори раздела пак.", "The Bible didn't load. Check your connection and open this tab again.")}</div>}
+      {!index && !err && (
+        <div style={{ display: "grid", placeItems: "center", padding: 24 }}>
+          <span className="spinner" />
+        </div>
+      )}
+      {index && (
+        <section className="card testaments">
+          {sections.map(([sec, title]) => {
+            const books = index.filter((b) => b.section === sec);
+            return (
+              <div key={sec} className={`testament ${open[sec] ? "open" : ""}`}>
+                <button className="li testament-head" onClick={() => toggle(sec)} aria-expanded={!!open[sec]}>
+                  <span className="grow">
+                    <span className="name">{title}</span>
+                    <span className="tiny muted" style={{ display: "block" }}>{tr(`${books.length} книги`, `${books.length} books`)}</span>
+                  </span>
+                  <span className="chev"><Icon name="down" size={18} /></span>
+                </button>
+                {open[sec] && (
+                  <div className="book-grid">
+                    {books.map((b) => (
+                      <button key={b.code} className="book-cell" onClick={() => go(b.chapters === 1 ? { k: "read", code: b.code, chapter: 1 } : { k: "book", code: b.code })}>
+                        <span>{bookName(b)}</span>
+                        <small>{b.chapters}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </section>
+      )}
+
+      <SavedFolders go={go} />
+
       <VerseCard go={go} />
 
       {DailyVerseRow && (
@@ -77,35 +139,59 @@ function BibleHome({ index, err, go }: { index: BookInfo[] | null; err: boolean;
         </Suspense>
       )}
 
-      {err && <div className="note warn">{tr("Библията не се зареди. Провери връзката и отвори раздела пак.", "The Bible didn't load. Check your connection and open this tab again.")}</div>}
-      {!index && !err && (
-        <div style={{ display: "grid", placeItems: "center", padding: 24 }}>
-          <span className="spinner" />
-        </div>
-      )}
-      {index &&
-        sections.map(([sec, title]) => (
-          <section key={sec}>
-            <div className="sec-head"><span className="eyebrow">{title}</span></div>
-            <div className="card book-grid">
-              {index
-                .filter((b) => b.section === sec)
-                .map((b) => (
-                  <button key={b.code} className="book-cell" onClick={() => go(b.chapters === 1 ? { k: "read", code: b.code, chapter: 1 } : { k: "book", code: b.code })}>
-                    <span>{bookName(b)}</span>
-                    <small>{b.chapters}</small>
-                  </button>
-                ))}
-            </div>
-          </section>
-        ))}
-
       <div className="tiny faint" style={{ textAlign: "center", paddingInline: 8, lineHeight: 1.5 }}>
         {tr("Текст на Библията", "Bible text")}: {WEB_CREDIT}.
         <br />
         {tr("Стиховете за поста", "Fasting verses")}: {NIV_CREDIT}
       </div>
     </div>
+  );
+}
+
+function SavedFolders({ go }: { go: (v: View) => void }) {
+  const { bible } = useStore();
+  const [name, setName] = useState("");
+  const [adding, setAdding] = useState(false);
+  const count = (id: string) => bible.saved.filter((v) => v.folderId === id).length;
+  return (
+    <section>
+      <div className="sec-head">
+        <span className="eyebrow">{tr("Запазени стихове", "Saved verses")}</span>
+        <button className="btn sm ghost" onClick={() => setAdding(!adding)}>
+          <Icon name="plus" size={16} /> {tr("Папка", "Folder")}
+        </button>
+      </div>
+      <div className="card">
+        {bible.folders.length === 0 && !adding && (
+          <div className="li" style={{ minHeight: 0 }}>
+            <span className="small muted">{tr("Докосни стих, докато четеш, за да го оцветиш или запазиш в папка.", "Tap a verse while reading to highlight it or save it to a folder.")}</span>
+          </div>
+        )}
+        {bible.folders.map((f) => (
+          <button key={f.id} className="li" onClick={() => go({ k: "folder", id: f.id })}>
+            <Icon name="book" size={18} />
+            <span className="grow name">{f.name}</span>
+            <span className="small faint">{count(f.id)}</span>
+            <Icon name="right" size={16} />
+          </button>
+        ))}
+        {adding && (
+          <form
+            className="li"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!name.trim()) return;
+              actions.addFolder(name);
+              setName("");
+              setAdding(false);
+            }}
+          >
+            <input autoFocus className="input" placeholder={tr("Име на папката, напр. Утеха", "Folder name, e.g. Comfort")} value={name} onChange={(e) => setName(e.target.value)} />
+            <button className="btn primary sm" disabled={!name.trim()}>{tr("Създай", "Create")}</button>
+          </form>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -146,11 +232,80 @@ function VerseCard({ go }: { go: (v: View) => void }) {
   );
 }
 
+/* ───────── a folder of saved verses ───────── */
+
+function FolderView({ id, index, go }: { id: string; index: BookInfo[]; go: (v: View) => void }) {
+  const { bible } = useStore();
+  const folder = bible.folders.find((f) => f.id === id);
+  const [confirm, setConfirm] = useState(false);
+  if (!folder) return <BibleHome index={index} err={false} go={go} />;
+  const items = bible.saved.filter((v) => v.folderId === id);
+  const info = (code: string) => index.find((b) => b.code === code);
+  return (
+    <div className="screen">
+      <header className="topbar" style={{ alignItems: "center" }}>
+        <button className="icon-btn" onClick={() => go({ k: "home" })} aria-label={tr("Назад", "Back")} style={{ marginLeft: -8 }}>
+          <Icon name="left" size={22} />
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="eyebrow">{tr(`Папка · ${items.length} стиха`, `Folder · ${items.length} saved`)}</div>
+          <input
+            className="h1 plan-title"
+            value={folder.name}
+            onChange={(e) => actions.renameFolder(id, e.target.value)}
+            onBlur={(e) => !e.target.value.trim() && actions.renameFolder(id, tr("Папка", "Folder"))}
+            aria-label={tr("Име на папката", "Folder name")}
+          />
+        </div>
+      </header>
+      {items.length === 0 && <div className="note">{tr("Още няма стихове тук. Докосни стих, докато четеш, и избери „Запази“.", "No verses here yet. Tap a verse while reading and choose “Save”.")}</div>}
+      {items.map((v) => {
+        const b = info(v.book);
+        return (
+          <article key={v.id} className="card pad saved-verse">
+            <div className="sec-head" style={{ padding: 0 }}>
+              <button className="eyebrow saved-ref" onClick={() => go({ k: "read", code: v.book, chapter: v.chapter, verse: v.verses[0] })}>
+                {b ? refOf(b, v.chapter, v.verses) : v.book} <Icon name="right" size={12} />
+              </button>
+              <button className="icon-btn" onClick={() => actions.removeSaved(v.id)} aria-label={tr("Премахни от папката", "Remove from folder")}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+            <p className="verse-text" lang="en" style={{ fontSize: 17 }}>{v.text}</p>
+          </article>
+        );
+      })}
+      <button
+        className="btn ghost block"
+        style={{ color: "var(--warn)" }}
+        onClick={() => {
+          if (!confirm) return setConfirm(true);
+          actions.deleteFolder(id);
+          go({ k: "home" });
+        }}
+      >
+        <Icon name="trash" size={18} /> {confirm ? tr("Натисни пак: папката и стиховете в нея се изтриват", "Tap again: the folder and its verses are deleted") : tr("Изтрий папката", "Delete folder")}
+      </button>
+    </div>
+  );
+}
+
 /* ───────── chapters of a book ───────── */
 
+function ChapterGrid({ info, current, onPick }: { info: BookInfo; current?: number; onPick: (c: number) => void }) {
+  return (
+    <div className="chapter-grid">
+      {Array.from({ length: info.chapters }, (_, i) => i + 1).map((c) => (
+        <button key={c} className={`chapter-cell ${current === c ? "on" : ""}`} onClick={() => onPick(c)}>
+          {c}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Chapters({ info, go }: { info: BookInfo; go: (v: View) => void }) {
-  const s = useStore();
-  const last = s.profile.bible;
+  const last = useStore().profile.bible;
   return (
     <div className="screen">
       <header className="topbar" style={{ alignItems: "center" }}>
@@ -162,13 +317,7 @@ function Chapters({ info, go }: { info: BookInfo; go: (v: View) => void }) {
           <h1 className="h1">{bookName(info)}</h1>
         </div>
       </header>
-      <div className="chapter-grid">
-        {Array.from({ length: info.chapters }, (_, i) => i + 1).map((c) => (
-          <button key={c} className={`chapter-cell ${last?.book === info.code && last.chapter === c ? "on" : ""}`} onClick={() => go({ k: "read", code: info.code, chapter: c })}>
-            {c}
-          </button>
-        ))}
-      </div>
+      <ChapterGrid info={info} current={last?.book === info.code ? last.chapter : undefined} onPick={(c) => go({ k: "read", code: info.code, chapter: c })} />
     </div>
   );
 }
@@ -177,16 +326,18 @@ function Chapters({ info, go }: { info: BookInfo; go: (v: View) => void }) {
 
 /** Remounted per chapter (key); the starting verse is fixed for the visit so saving the place doesn't move the page */
 function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chapter: number; verse?: number; go: (v: View) => void }) {
+  const { bible } = useStore();
   const [verse] = useState(startVerse);
   const [text, setText] = useState<BookText | null>(null);
   const [err, setErr] = useState(false);
-  const [mark] = useState<number | undefined>(verse);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [picker, setPicker] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [barHidden, setBarHidden] = useState(false);
   const body = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let live = true;
-    setText(null);
-    setErr(false);
     loadBook(info.code).then((t) => live && setText(t), () => live && setErr(true));
     return () => {
       live = false;
@@ -203,18 +354,25 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
   useLayoutEffect(() => {
     if (!verses || !verse || verse <= 1) return;
     const el = body.current?.querySelector<HTMLElement>(`[data-v="${verse}"]`);
-    if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 90 });
+    if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 16 });
   }, [verses, verse]);
 
   useEffect(() => {
     if (!verses) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastY = window.scrollY;
     const onScroll = () => {
+      // the chapter bar steps aside while reading down and comes back when scrolling up
+      const y = window.scrollY;
+      if (Math.abs(y - lastY) > 6) {
+        setBarHidden(y > lastY && y > 80);
+        lastY = y;
+      }
       clearTimeout(timer);
       timer = setTimeout(() => {
         const els = body.current?.querySelectorAll<HTMLElement>("[data-v]") ?? [];
         for (const el of els) {
-          if (el.getBoundingClientRect().bottom > 90) {
+          if (el.getBoundingClientRect().bottom > 12) {
             const v = Number(el.dataset.v);
             actions.updateProfile({ bible: { book: info.code, chapter, verse: v > 1 ? v : undefined } });
             break;
@@ -231,17 +389,24 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
 
   const prev = chapter > 1 ? chapter - 1 : null;
   const next = chapter < info.chapters ? chapter + 1 : null;
-  const title = useMemo(() => `${bookName(info)} ${chapter}`, [info, chapter]);
+  const title = `${bookName(info)} ${chapter}`;
+  const toggleVerse = (n: number) => setSelected((sel) => (sel.includes(n) ? sel.filter((x) => x !== n) : [...sel, n]));
+  const selKeys = selected.map((n) => hlKey(info.code, chapter, n));
+  const selText = () =>
+    (verses ?? [])
+      .filter(([n]) => selected.includes(n))
+      .map(([, t]) => t)
+      .join(" ");
 
   return (
     <div className="screen reader">
-      <header className="topbar reader-bar">
-        <button className="icon-btn" onClick={() => go(info.chapters > 1 ? { k: "book", code: info.code } : { k: "home" })} aria-label={tr("Назад", "Back")} style={{ marginLeft: -8 }}>
+      <header className="topbar" style={{ alignItems: "center" }}>
+        <button className="icon-btn" onClick={() => go({ k: "home" })} aria-label={tr("Към книгите", "To the books")} style={{ marginLeft: -8 }}>
           <Icon name="left" size={22} />
         </button>
-        <button className="reader-title" onClick={() => go({ k: "home" })} aria-label={tr("Към всички книги", "To all books")}>
+        <button className="reader-title" onClick={() => setPicker(true)} aria-label={tr("Избери глава", "Choose a chapter")}>
           <span className="eyebrow">{tr("Библия", "Bible")}</span>
-          <span className="h2">{title}</span>
+          <span className="h2">{title} <Icon name="down" size={16} /></span>
         </button>
         <span style={{ width: 40 }} />
       </header>
@@ -254,12 +419,16 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
       )}
       {verses && (
         <div className="scripture" ref={body} lang="en">
-          {verses.map(([n, t]) => (
-            <span key={n} data-v={n} className={mark === n ? "hl" : undefined}>
-              <sup>{n}</sup>
-              {t}{" "}
-            </span>
-          ))}
+          {verses.map(([n, t]) => {
+            const hl = bible.highlights[hlKey(info.code, chapter, n)];
+            const cls = [hl ? `hl-${hl}` : "", selected.includes(n) ? "sel" : "", !hl && verse === n ? "here" : ""].filter(Boolean).join(" ");
+            return (
+              <span key={n} data-v={n} className={cls || undefined} onClick={() => toggleVerse(n)}>
+                <sup>{n}</sup>
+                {t}{" "}
+              </span>
+            );
+          })}
         </div>
       )}
 
@@ -274,6 +443,108 @@ function Reader({ info, chapter, verse: startVerse, go }: { info: BookInfo; chap
           </button>
         </div>
       )}
+
+      {selected.length > 0 ? (
+        <div className="float-bar verse-tools" role="toolbar" aria-label={tr("Избрани стихове", "Selected verses")}>
+          <span className="tiny" style={{ fontWeight: 700 }}>{refOf(info, chapter, selected)}</span>
+          <div className="tool-row">
+            {COLORS.map((c) => (
+              <button key={c} className={`swatch-dot hl-dot-${c}`} aria-label={tr("Оцвети", "Highlight") + " " + c} onClick={() => { actions.setHighlight(selKeys, c); setSelected([]); }} />
+            ))}
+            {selKeys.some((k) => bible.highlights[k]) && (
+              <button className="tool-btn" onClick={() => { actions.setHighlight(selKeys, null); setSelected([]); }} aria-label={tr("Махни оцветяването", "Remove highlight")}>
+                <Icon name="x" size={16} />
+              </button>
+            )}
+            <span className="tool-sep" />
+            <button className="tool-btn" onClick={() => setSaving(true)}>
+              <Icon name="book" size={16} /> {tr("Запази", "Save")}
+            </button>
+            <button
+              className="tool-btn"
+              onClick={() => {
+                navigator.clipboard?.writeText(`${selText()} — ${refOf(info, chapter, selected)} (WEB)`).then(
+                  () => toast(tr("Копирано", "Copied")),
+                  () => toast(tr("Не можах да копирам", "Couldn't copy")),
+                );
+                setSelected([]);
+              }}
+            >
+              {tr("Копирай", "Copy")}
+            </button>
+            <button className="tool-btn" onClick={() => setSelected([])} aria-label={tr("Откажи избора", "Clear selection")}>
+              <Icon name="x" size={16} />
+            </button>
+          </div>
+        </div>
+      ) : (
+        verses && (
+          <div className={`float-bar chapter-pill ${barHidden ? "away" : ""}`}>
+            <button className="icon-btn" disabled={!prev} onClick={() => prev && go({ k: "read", code: info.code, chapter: prev })} aria-label={tr("Предишна глава", "Previous chapter")}>
+              <Icon name="left" size={18} />
+            </button>
+            <button className="pill-title" onClick={() => setPicker(true)}>
+              {title} <Icon name="down" size={14} />
+            </button>
+            <button className="icon-btn" disabled={!next} onClick={() => next && go({ k: "read", code: info.code, chapter: next })} aria-label={tr("Следваща глава", "Next chapter")}>
+              <Icon name="right" size={18} />
+            </button>
+          </div>
+        )
+      )}
+
+      {picker && (
+        <Sheet title={bookName(info)} onClose={() => setPicker(false)}>
+          <ChapterGrid info={info} current={chapter} onPick={(c) => { setPicker(false); if (c !== chapter) go({ k: "read", code: info.code, chapter: c }); }} />
+          <button className="btn ghost block" onClick={() => { setPicker(false); go({ k: "home" }); }}>
+            <Icon name="bible" size={18} /> {tr("Друга книга", "Another book")}
+          </button>
+        </Sheet>
+      )}
+
+      {saving && (
+        <SaveSheet
+          onClose={() => setSaving(false)}
+          onSave={(folderId) => {
+            actions.saveVerses({ folderId, book: info.code, chapter, verses: [...selected].sort((a, b) => a - b), text: selText() });
+            const f = getState().bible.folders.find((x) => x.id === folderId);
+            toast(tr(`Запазено в „${f?.name}“`, `Saved to “${f?.name}”`));
+            setSaving(false);
+            setSelected([]);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function SaveSheet({ onClose, onSave }: { onClose: () => void; onSave: (folderId: string) => void }) {
+  const { bible } = useStore();
+  const [name, setName] = useState("");
+  const count = (id: string) => bible.saved.filter((v: SavedVerse) => v.folderId === id).length;
+  return (
+    <Sheet title={tr("Запази в папка", "Save to a folder")} onClose={onClose}>
+      {bible.folders.length > 0 && (
+        <div className="card" style={{ boxShadow: "none", background: "var(--surface-2)" }}>
+          {bible.folders.map((f) => (
+            <button key={f.id} className="li" onClick={() => onSave(f.id)}>
+              <Icon name="book" size={18} />
+              <span className="grow name">{f.name}</span>
+              <span className="small faint">{count(f.id)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <form
+        style={{ display: "flex", gap: 8 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (name.trim()) onSave(actions.addFolder(name));
+        }}
+      >
+        <input className="input" autoFocus={!bible.folders.length} placeholder={tr("Нова папка", "New folder")} value={name} onChange={(e) => setName(e.target.value)} />
+        <button className="btn primary" disabled={!name.trim()}>{tr("Създай", "Create")}</button>
+      </form>
+    </Sheet>
   );
 }
