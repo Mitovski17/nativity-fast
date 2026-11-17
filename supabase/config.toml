@@ -1,0 +1,9 @@
+project_id = "ggujbeofqimpbstnnkhm"
+
+# Both functions check the caller's session themselves (works with the new
+# publishable/secret API keys), so the gateway JWT check is off.
+[functions.ai]
+verify_jwt = false
+
+[functions.delete-account]
+verify_jwt = false

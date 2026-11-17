@@ -1,0 +1,12 @@
+node_modules
+dist
+.vercel
+.env.local
+*.log
+supabase/.temp
+supabase/.branches
+dist-artifact
+
+.vercel
+.env*
+.claude
