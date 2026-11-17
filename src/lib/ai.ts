@@ -199,7 +199,7 @@ ${text.slice(0, 8000)}
 """
 
 Foods already in the person's library (if a food in the plan matches one, use exactly that name):
-${libraryNames.slice(0, 200).join("; ")}
+${libraryNames.slice(0, 450).join("; ")}
 
 Rules:
 - Split it into meals using the names from the plan (for example ${en ? '"Breakfast", "Lunch", "Snack", "Dinner"' : '"Закуска", "Обяд", "Междинно", "Вечеря"'}).
@@ -210,7 +210,12 @@ Rules:
 - ${KINDS}
 Reply with JSON only:
 {"meals": [{"name": "${en ? "Breakfast" : "Закуска"}", "items": [{"name": "${en ? "Rolled oats" : "Овесени ядки"}", "qty": 80, "unit": "g", "gramsPerUnit": null, "kcal": 379, "protein": 13.2, "carbs": 67.7, "fat": 6.5, "kind": "vegan"}]}]}`;
-  const r = await s.json<{ meals?: { name?: string; items?: Record<string, unknown>[] }[] }>(prompt, { signal, cache: false });
+  const r = await s.json<PlanReply>(prompt, { signal, cache: false });
+  return readMeals(r);
+}
+
+type PlanReply = { meals?: { name?: string; items?: Record<string, unknown>[] }[] };
+function readMeals(r: PlanReply): ParsedMeal[] {
   return (r.meals ?? [])
     .map((m) => ({
       name: String(m.name ?? tr("Хранене", "Meal")),
@@ -227,4 +232,52 @@ Reply with JSON only:
       }),
     }))
     .filter((m) => m.items.length);
+}
+
+/* ───────── generate a plan for one kind of fasting day ───────── */
+
+export interface PlanGoal {
+  kcal: number;
+  p: number;
+  c: number;
+  f: number;
+  meals: number;
+  prefs: string;
+}
+
+const DAY_RULES: Record<"strict" | "oil" | "fish", string> = {
+  strict: `a STRICT fasting day: only plant foods ("vegan" kind) and no oil or fat added at all (no olive/sunflower oil, no hummus, no olives, no fried food). Nuts, seeds, nut butters, tahini and avocado are allowed. No fish, seafood, meat, dairy or eggs.`,
+  oil: `an OIL day: plant foods ("vegan" or "oil" kind), cooking oil and olive oil are allowed. No fish, no seafood, no meat, dairy or eggs.`,
+  fish: `a FISH day: plant foods, oil, fish ("fish") and invertebrate seafood ("seafood") are allowed. No meat, dairy or eggs.`,
+};
+
+/**
+ * Asks Claude for a day of meals that fits the Orthodox Nativity fast rule for that day type
+ * and the person's calorie and macro targets. Same reply shape as parsePlan.
+ */
+export async function generatePlanDay(type: "strict" | "oil" | "fish", goal: PlanGoal, foodNames: string[], signal?: AbortSignal): Promise<ParsedMeal[]> {
+  const s = await getAI();
+  if (!s) throw { code: "unavailable" };
+  const en = getLang() === "en";
+  const mealNames = (en ? ["Breakfast", "Lunch", "Snack", "Dinner", "Snack 2", "Supper"] : ["Закуска", "Обяд", "Междинно", "Вечеря", "Междинно 2", "Късна вечеря"]).slice(0, Math.max(2, Math.min(6, goal.meals)));
+  const prompt = `You are a sports dietitian who plans meals for people keeping the Orthodox Christmas (Nativity) fast in Bulgaria.
+Plan ONE day of eating for ${DAY_RULES[type]}
+
+Targets for the whole day (stay within about 5%): ${Math.round(goal.kcal)} kcal, protein ${Math.round(goal.p)} g, carbohydrate ${Math.round(goal.c)} g, fat ${Math.round(goal.f)} g.
+Meals: ${goal.meals}, named: ${mealNames.map((m) => `"${m}"`).join(", ")}.
+${goal.prefs.trim() ? `The person's preferences and notes (follow them where the fasting rule allows):\n"""\n${goal.prefs.trim().slice(0, 1500)}\n"""\n` : ""}
+Use simple foods that are easy to buy in Bulgaria. Prefer foods from this list and use exactly these names when you do:
+${foodNames.slice(0, 450).join("; ")}
+
+Rules:
+- Write meal and food names in ${outLang()}.
+- Give realistic portions. "unit" is one of: "g", "ml", "cup" (240 ml), "tbsp", "tsp", "pc" (piece), "serving"; prefer "g" for most foods.
+- "gramsPerUnit" is the weight in grams of 1 unit for pc, serving, cup, tbsp, tsp; null for g and ml.
+- kcal, protein, carbs and fat are typical values per 100 g of the food (not for the portion).
+- ${KINDS}
+- Check the day total against the targets before answering and adjust the portions.
+Reply with JSON only:
+{"meals": [{"name": "${mealNames[0]}", "items": [{"name": "${en ? "Rolled oats" : "Овесени ядки"}", "qty": 80, "unit": "g", "gramsPerUnit": null, "kcal": 379, "protein": 13.2, "carbs": 67.7, "fat": 6.5, "kind": "vegan"}]}]}`;
+  const r = await s.json<PlanReply>(prompt, { signal, cache: false });
+  return readMeals(r);
 }

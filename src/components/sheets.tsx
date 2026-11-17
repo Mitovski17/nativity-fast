@@ -1,13 +1,14 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { DayType, Entry, Food, Item, Kind, PlanType, Target, Unit } from "../lib/types";
-import { actions, foodByBarcode, foodByName, getState, mealOrder, dayView, useStore } from "../lib/store";
+import type { DayType, Entry, Food, Item, Kind, Meal, PlanType, Plans, Target, Unit } from "../lib/types";
+import { actions, activePlan, foodByBarcode, foodByName, getState, mealOrder, dayView, useStore } from "../lib/store";
 import { DAY_META, KIND_META, allowedKinds, dayType, longDate } from "../lib/fast";
 import { UNIT_META, fmtK, fmtQty, itemFromFood, itemMacros, sum, uid, unitsFor, r0 } from "../lib/nutrition";
-import { aiErrorText, aiStatus, estimateFood, parsePlan, readLabel, scanMeal, type MealScan, type ParsedMeal } from "../lib/ai";
+import { aiErrorText, aiStatus, estimateFood, generatePlanDay, parsePlan, readLabel, scanMeal, type MealScan, type ParsedMeal } from "../lib/ai";
 import { decodeBarcode, liveCameraLikely, lookupOpenFoodFacts } from "../lib/barcode";
 import { CameraInput, LiveScanner } from "./Scanner";
-import { Icon, KindDot, MacroLine, NumberInput, Sheet, Summary, toast } from "./ui";
+import { Icon, KindDot, MacroLine, NumberInput, Sheet, Summary, Switch, toast } from "./ui";
 import { getLang, tr } from "../lib/i18n";
+import { DB, dbByName, dbName, dbToFood, norm, searchDb } from "../lib/foodsdb";
 
 export type SheetState =
   | { k: "add"; target: Target; quick?: boolean }
@@ -15,11 +16,12 @@ export type SheetState =
   | { k: "qty"; target: Target; food: Food }
   | { k: "food"; food?: Partial<Food>; then?: Target }
   | { k: "entry"; date: string; entry: Entry }
-  | { k: "planItem"; plan: PlanType; item: Item }
+  | { k: "planItem"; planId: string; plan: PlanType; item: Item }
   | { k: "scan"; target: Target; file?: File }
   | { k: "barcode"; target: Target; code?: string; file?: File }
   | { k: "live"; target: Target }
-  | { k: "newplan"; plan: PlanType }
+  | { k: "newplan"; mode?: "insert" | "generate" }
+  | { k: "goal" }
   | { k: "daytype"; date: string };
 
 type Open = (s: SheetState | null) => void;
@@ -30,7 +32,7 @@ const KINDS: Kind[] = ["vegan", "oil", "seafood", "fish", "animal"];
 
 function commit(target: Target, items: Item[]) {
   if (target.to === "day") actions.addEntries(target.date, target.meal, items, true);
-  else actions.addPlanItems(target.plan, target.mealId, items);
+  else actions.addPlanItems(target.planId, target.plan, target.mealId, items);
 }
 
 function useAI() {
@@ -48,7 +50,7 @@ function useAI() {
 function targetMeals(target: Target): string[] {
   const s = getState();
   if (target.to === "day") return mealOrder(s, target.date, dayView(s, target.date).entries);
-  return s.plans[target.plan].map((m) => m.name);
+  return (s.plans[target.planId]?.days[target.plan] ?? []).map((m) => m.name);
 }
 
 function MealChips({ target, onChange }: { target: Target; onChange: (t: Target) => void }) {
@@ -86,10 +88,33 @@ function KindWarning({ kind, target }: { kind: Kind; target: Target }) {
 export function AddSheet({ target, quick }: { target: Target; quick?: boolean }) {
   const open = useSheet();
   const ai = useAI();
+  const [q, setQ] = useState("");
   const where = target.to === "day" ? longDate(target.date) : tr(`план · ${DAY_META[target.plan].title.toLowerCase()}`, `plan · ${DAY_META[target.plan].title.toLowerCase()}`);
   return (
     <Sheet title={tr("Добави храна", "Add food")} onClose={() => open(null)}>
       <div className="small muted" style={{ marginTop: -8 }}>{where}</div>
+      <div className="search">
+        <Icon name="search" size={18} />
+        <input
+          id="add-search"
+          className="input"
+          type="search"
+          enterKeyHint="search"
+          placeholder={tr("Търси храна: банан, ориз, тофу…", "Search foods: banana, rice, tofu…")}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+      </div>
+      {q.trim() ? (
+        <>
+          <div className="card" style={{ boxShadow: "none", background: "transparent", margin: "0 -18px" }}>
+            <LibraryList query={q} withDb onPick={(food) => open({ k: "qty", target, food })} />
+          </div>
+          <button className="btn ghost block" onClick={() => open({ k: "food", food: { name: q.trim() }, then: target })}>
+            <Icon name="plus" size={18} /> {tr("Нова храна", "New food")} {tr(`„${q.trim()}“`, `“${q.trim()}”`)}
+          </button>
+        </>
+      ) : (
       <div className="action-grid">
         <MealPhotoAction target={target} className="action hero">
           <span className="ic"><Icon name="camera" /></span>
@@ -122,6 +147,7 @@ export function AddSheet({ target, quick }: { target: Target; quick?: boolean })
         </button>
         </>}
       </div>
+      )}
     </Sheet>
   );
 }
@@ -154,33 +180,51 @@ export function BarcodeAction({ target, className, style, children }: { target: 
 
 /* ───────── library picker ───────── */
 
-export function LibraryList({ onPick, query, kindFilter }: { onPick: (f: Food) => void; query: string; kindFilter?: Kind | null }) {
+export function LibraryList({ onPick, query, kindFilter, withDb }: { onPick: (f: Food) => void; query: string; kindFilter?: Kind | null; withDb?: boolean }) {
   const { foods } = useStore();
   const list = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = norm(query);
     return Object.values(foods)
-      .filter((f) => (!q || f.name.toLowerCase().includes(q) || f.brand?.toLowerCase().includes(q) || f.barcode === q) && (!kindFilter || f.kind === kindFilter))
+      .filter((f) => (!q || norm(f.name).includes(q) || (f.brand && norm(f.brand).includes(q)) || f.barcode === query.trim()) && (!kindFilter || f.kind === kindFilter))
       .sort((a, b) => (b.source === "seed" ? 0 : 1) - (a.source === "seed" ? 0 : 1) || a.name.localeCompare(b.name, getLang()));
   }, [foods, query, kindFilter]);
-  if (!list.length) return <div className="empty">{tr("Няма храни, които да отговарят.", "No matching foods.")}</div>;
+  const fromDb = useMemo(() => {
+    if (!withDb || !query.trim()) return [];
+    // a database food already in the library (same id or same name) shows only once
+    const saved = new Set(Object.values(foods).map((f) => norm(f.name)));
+    return searchDb(query, 40)
+      .filter((d) => !foods[d.id] && !saved.has(norm(d.names.bg)) && !saved.has(norm(d.names.en)) && (!kindFilter || d.kind === kindFilter))
+      .map(dbToFood);
+  }, [withDb, query, foods, kindFilter]);
+  if (!list.length && !fromDb.length) return <div className="empty">{tr("Няма храни, които да отговарят.", "No matching foods.")}</div>;
   return (
     <div className="list">
-      {list.map((f) => (
-        <button key={f.id} className="li" onClick={() => onPick(f)}>
-          <KindDot kind={f.kind} />
-          <div className="grow">
-            <div className="name">{f.name}</div>
-            <div className="tiny faint" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <span>{f.brand ? `${f.brand} · ` : ""}{fmtK(f.per100.kcal)} kcal</span>
-              <MacroLine m={f.per100} />
-              <span>/ 100 {tr("г", "g")}</span>
-            </div>
-          </div>
-          {f.source === "barcode" && <span className="faint"><Icon name="barcode" size={16} /></span>}
-          {f.source === "ai" && <span className="faint"><Icon name="sparkle" size={16} /></span>}
-        </button>
+      {[...list, ...fromDb].map((f, i) => (
+        <FoodRow key={f.id} f={f} onPick={onPick} header={i === list.length && fromDb.length ? tr(`База с храни · ${DB.length}`, `Food database · ${DB.length}`) : undefined} />
       ))}
     </div>
+  );
+}
+
+function FoodRow({ f, onPick, header }: { f: Food; onPick: (f: Food) => void; header?: string }) {
+  return (
+    <>
+      {header && <div className="eyebrow" style={{ padding: "14px 18px 6px" }}>{header}</div>}
+      <button className="li" onClick={() => onPick(f)}>
+        <KindDot kind={f.kind} />
+        <div className="grow">
+          <div className="name">{f.name}</div>
+          <div className="tiny faint" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span>{f.brand ? `${f.brand} · ` : ""}{fmtK(f.per100.kcal)} kcal</span>
+            <MacroLine m={f.per100} />
+            <span>/ 100 {tr("г", "g")}</span>
+          </div>
+        </div>
+        {f.source === "barcode" && <span className="faint"><Icon name="barcode" size={16} /></span>}
+        {f.source === "ai" && <span className="faint"><Icon name="sparkle" size={16} /></span>}
+        {f.source === "db" && !getState().foods[f.id] && <span className="faint"><Icon name="plus" size={16} /></span>}
+      </button>
+    </>
   );
 }
 
@@ -194,7 +238,7 @@ export function PickSheet({ target }: { target: Target }) {
         <input id="pick-search" className="input" placeholder={tr("Търси храна", "Search foods")} value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
       <div className="card" style={{ boxShadow: "none", background: "transparent", margin: "0 -18px" }}>
-        <LibraryList query={q} onPick={(food) => open({ k: "qty", target, food })} />
+        <LibraryList query={q} withDb onPick={(food) => open({ k: "qty", target, food })} />
       </div>
       <button className="btn ghost block" onClick={() => open({ k: "food", food: q ? { name: q } : undefined, then: target })}>
         <Icon name="plus" size={18} /> {tr("Нова храна", "New food")}{q ? tr(` „${q}“`, ` “${q}”`) : ""}
@@ -257,6 +301,7 @@ export function QtySheet({ target: t0, food }: { target: Target; food: Food }) {
             style={{ flex: 1 }}
             disabled={!(item.qty > 0)}
             onClick={() => {
+              if (!getState().foods[food.id]) actions.upsertFood(food);
               commit(target, [item]);
               toast(tr(`Добавено: ${food.name}`, `Added: ${food.name}`));
               open(null);
@@ -319,7 +364,7 @@ export function EntrySheet({ date, entry }: { date: string; entry: Entry }) {
   );
 }
 
-export function PlanItemSheet({ plan, item: i0 }: { plan: PlanType; item: Item }) {
+export function PlanItemSheet({ planId, plan, item: i0 }: { planId: string; plan: PlanType; item: Item }) {
   const open = useSheet();
   const [item, setItem] = useState<Item>(i0);
   return (
@@ -328,10 +373,10 @@ export function PlanItemSheet({ plan, item: i0 }: { plan: PlanType; item: Item }
       onClose={() => open(null)}
       foot={
         <>
-          <button className="btn danger" onClick={() => { actions.removePlanItem(plan, i0.id); open(null); }} aria-label={tr("Премахни", "Remove")}>
+          <button className="btn danger" onClick={() => { actions.removePlanItem(planId, plan, i0.id); open(null); }} aria-label={tr("Премахни", "Remove")}>
             <Icon name="trash" size={18} />
           </button>
-          <button className="btn primary" style={{ flex: 1 }} onClick={() => { actions.updatePlanItem(plan, item); open(null); }}>
+          <button className="btn primary" style={{ flex: 1 }} onClick={() => { actions.updatePlanItem(planId, plan, item); open(null); }}>
             {tr("Запази", "Save")}
           </button>
         </>
@@ -764,7 +809,7 @@ export function BarcodeSheet({ target, code: c0, file: f0 }: { target: Target; c
   );
 }
 
-/* ───────── new plan from text ───────── */
+/* ───────── new plan: write/paste your own, or let AI make one ───────── */
 
 const placeholder = () =>
   tr(
@@ -778,11 +823,152 @@ Snack: 1 apple, 30 g walnuts
 Dinner: 200 g tofu, 200 g rice, broccoli`,
   );
 
-export function NewPlanSheet({ plan }: { plan: PlanType }) {
+const PLAN_TYPES: PlanType[] = ["strict", "oil", "fish"];
+type ParsedItem = ParsedMeal["items"][number];
+
+/** Foods the AI should prefer, by exact name: the person's library and the built-in database */
+const knownFoodNames = () => Array.from(new Set([...Object.values(getState().foods).map((f) => f.name), ...DB.map(dbName)]));
+
+/**
+ * The food behind an AI item: a saved food with that name, else the database entry
+ * (USDA values beat the AI's estimate), else a new food from the AI's numbers.
+ */
+function resolveFood(it: ParsedItem): { food: Food; save: boolean } {
+  const st = getState();
+  const unitGrams = it.gramsPerUnit && it.unit !== "g" && it.unit !== "ml" ? { [it.unit]: it.gramsPerUnit } : {};
+  let food = foodByName(st, it.name);
+  let save = false;
+  if (!food) {
+    const d = dbByName(it.name);
+    if (d) {
+      food = st.foods[d.id] ?? dbToFood(d);
+      save = !st.foods[d.id];
+    }
+  }
+  if (!food) return { food: { id: uid(), name: it.name, kind: it.kind, per100: it.per100, units: unitGrams, source: "ai", createdAt: Date.now() }, save: true };
+  if (it.gramsPerUnit && it.unit !== "g" && it.unit !== "ml" && !food.units[it.unit]) return { food: { ...food, units: { ...food.units, ...unitGrams } }, save: true };
+  return { food, save };
+}
+
+/** Plan meals from the AI's reply; new foods are added to the library */
+function buildMeals(parsed: ParsedMeal[]): Meal[] {
+  return parsed.map((m) => ({
+    id: uid(),
+    name: m.name,
+    items: m.items.map((it) => {
+      const { food, save } = resolveFood(it);
+      if (save) actions.upsertFood(food);
+      return itemFromFood(food, it.qty, it.unit);
+    }),
+  }));
+}
+
+/** Totals as they will be saved (database values where a name matches) */
+function previewTotals(parsed: ParsedMeal[]) {
+  const meals = parsed.map((m) => {
+    const total = sum(m.items.map((it) => itemMacros(itemFromFood(resolveFood(it).food, it.qty, it.unit))));
+    return { name: m.name, items: m.items, total };
+  });
+  return { meals, total: sum(meals.map((m) => m.total)) };
+}
+
+function MealsPreview({ parsed }: { parsed: ParsedMeal[] }) {
+  const { meals } = previewTotals(parsed);
+  return (
+    <>
+      {meals.map((m, i) => (
+        <div key={i} className="card" style={{ boxShadow: "none", background: "var(--surface-2)" }}>
+          <div className="meal-head"><span className="h2">{m.name}</span><span className="meal-kcal">{fmtK(m.total.kcal)} kcal</span></div>
+          {m.items.map((it, j) => (
+            <div key={j} className="li" style={{ padding: "10px 18px", minHeight: 0 }}>
+              <KindDot kind={it.kind} />
+              <div className="grow name">{it.name}</div>
+              <span className="small muted">{fmtQty(it.qty)} {UNIT_META[it.unit].label}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function PlanName({ name, setName, activate, setActivate }: { name: string; setName: (s: string) => void; activate: boolean; setActivate: (v: boolean) => void }) {
+  return (
+    <>
+      <label className="field">
+        <span>{tr("Име на плана", "Plan name")}</span>
+        <input id="plan-name" className="input" value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <div style={{ fontWeight: 600 }}>{tr("Започни да го използваш", "Start using it")}</div>
+          <div className="tiny muted">{tr("Попълва дните, в които още не си отбелязвал нищо", "Fills the days you haven't ticked anything on yet")}</div>
+        </div>
+        <Switch on={activate} onChange={setActivate} label={tr("Започни да го използваш", "Start using it")} />
+      </div>
+    </>
+  );
+}
+
+function TypePicker({ types, setTypes }: { types: PlanType[]; setTypes: (t: PlanType[]) => void }) {
+  return (
+    <div className="field">
+      <span>{tr("За кои дни", "For which days")}</span>
+      <div className="seg">
+        {PLAN_TYPES.map((t) => (
+          <button key={t} className={types.includes(t) ? "on" : ""} onClick={() => setTypes(types.includes(t) ? types.filter((x) => x !== t) : PLAN_TYPES.filter((x) => x === t || types.includes(x)))}>
+            <span className={`dot ${t}`} /> {DAY_META[t].short}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function savePlan(name: string, byType: Partial<Record<PlanType, ParsedMeal[]>>, activate: boolean) {
+  const days: Plans = { strict: [], oil: [], fish: [] };
+  for (const t of PLAN_TYPES) if (byType[t]?.length) days[t] = buildMeals(byType[t]!);
+  actions.addPlan(name.trim() || tr("Моят план", "My plan"), days, activate);
+  toast(activate ? tr("Планът е запазен и активен", "Plan saved and switched on") : tr("Планът е запазен", "Plan saved"));
+}
+
+export function NewPlanSheet({ mode: m0 }: { mode?: "insert" | "generate" }) {
   const open = useSheet();
   const ai = useAI();
+  const [mode, setMode] = useState<"choose" | "insert" | "generate">(m0 ?? "choose");
+  const title = mode === "generate" ? tr("Генерирай план", "Generate a plan") : mode === "insert" ? tr("Въведи план", "Insert a plan") : tr("Нов план", "New plan");
+
+  if (mode === "choose")
+    return (
+      <Sheet title={title} onClose={() => open(null)}>
+        <div className="action-grid">
+          <button className="action" onClick={() => setMode("insert")}>
+            <span className="ic"><Icon name="pen" /></span>
+            <span>
+              <b>{tr("Въведи план", "Insert a plan")}</b>
+              <small>{tr("Напиши или постави своя план", "Write or paste your own plan")}</small>
+            </span>
+          </button>
+          <button className="action hero" onClick={() => setMode("generate")}>
+            <span className="ic"><Icon name="sparkle" /></span>
+            <span>
+              <b>{tr("Генерирай с AI", "Generate with AI")}</b>
+              <small>{tr("По твоите калории и макроси", "From your calories and macros")}</small>
+            </span>
+          </button>
+        </div>
+        {ai && !ai.text && <div className="note">{tr("AI работи, когато приложението е отворено в Claude или в уеб версията.", "AI works when the app is open in Claude or on the website.")}</div>}
+      </Sheet>
+    );
+  return mode === "insert" ? <InsertPlan title={title} back={m0 ? undefined : () => setMode("choose")} aiReady={!!ai?.text} /> : <GeneratePlan title={title} back={m0 ? undefined : () => setMode("choose")} aiReady={!!ai?.text} />;
+}
+
+function InsertPlan({ title, back, aiReady }: { title: string; back?: () => void; aiReady: boolean }) {
+  const open = useSheet();
+  const [name, setName] = useState(tr("Моят план", "My plan"));
+  const [activate, setActivate] = useState(true);
   const [text, setText] = useState("");
-  const [targets, setTargets] = useState<PlanType[]>([plan]);
+  const [types, setTypes] = useState<PlanType[]>(PLAN_TYPES);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [parsed, setParsed] = useState<ParsedMeal[] | null>(null);
@@ -794,8 +980,7 @@ export function NewPlanSheet({ plan }: { plan: PlanType }) {
     setErr("");
     ctl.current = new AbortController();
     try {
-      const names = Object.values(getState().foods).map((f) => f.name);
-      const meals = await parsePlan(text, names, ctl.current.signal);
+      const meals = await parsePlan(text, knownFoodNames(), ctl.current.signal);
       if (!meals.length) setErr(tr("Не открих храни в текста. Напиши по едно хранене на ред.", "No foods found in the text. Write one meal per line."));
       setParsed(meals);
     } catch (e) {
@@ -806,99 +991,273 @@ export function NewPlanSheet({ plan }: { plan: PlanType }) {
     }
   }
 
-  function build(): { meals: { id: string; name: string; items: Item[] }[] } {
-    const st = getState();
-    const meals = (parsed ?? []).map((m) => ({
-      id: uid(),
-      name: m.name,
-      items: m.items.map((it) => {
-        let food = foodByName(st, it.name);
-        if (!food) {
-          const units: Food["units"] = {};
-          if (it.gramsPerUnit && it.unit !== "g" && it.unit !== "ml") units[it.unit] = it.gramsPerUnit;
-          food = { id: uid(), name: it.name, kind: it.kind, per100: it.per100, units, source: "ai", createdAt: Date.now() };
-          actions.upsertFood(food);
-        } else if (it.gramsPerUnit && it.unit !== "g" && it.unit !== "ml" && !food.units[it.unit]) {
-          food = { ...food, units: { ...food.units, [it.unit]: it.gramsPerUnit } };
-          actions.upsertFood(food);
-        }
-        return itemFromFood(food, it.qty, it.unit);
-      }),
-    }));
-    return { meals };
-  }
-
   function save() {
-    const { meals } = build();
-    targets.forEach((t) => actions.setPlanMeals(t, meals.map((m) => ({ ...m, id: uid(), items: m.items.map((i) => ({ ...i, id: uid() })) }))));
-    actions.updateProfile({ planIsExample: false });
-    toast(tr("Планът е запазен", "Plan saved"));
+    savePlan(name, Object.fromEntries(types.map((t) => [t, parsed ?? []])), activate);
     open(null);
   }
 
-  const preview = (parsed ?? []).map((m) => ({
-    name: m.name,
-    items: m.items,
-    total: sum(m.items.map((it) => itemMacros({ per100: it.per100, qty: it.qty, unit: it.unit, units: it.gramsPerUnit ? { [it.unit]: it.gramsPerUnit } : {} }))),
-  }));
-  const grand = sum(preview.map((p) => p.total));
-
+  const ready = parsed && parsed.length;
   return (
     <Sheet
-      title={tr("Нов план", "New plan")}
+      title={title}
       onClose={() => open(null)}
       foot={
-        parsed && parsed.length ? (
+        ready ? (
           <>
             <button className="btn ghost" onClick={() => setParsed(null)}>{tr("Назад", "Back")}</button>
-            <button className="btn primary" style={{ flex: 1 }} disabled={!targets.length} onClick={save}>{tr("Запази плана", "Save plan")}</button>
+            <button className="btn primary" style={{ flex: 1 }} disabled={!types.length} onClick={save}>{tr("Запази плана", "Save plan")}</button>
           </>
         ) : (
-          <button className="btn primary block" disabled={!text.trim() || busy || !ai?.text} onClick={run}>
-            {busy ? <span className="spinner" /> : <Icon name="sparkle" size={18} />} {tr("Разчети плана", "Read my plan")}
-          </button>
+          <>
+            {back && <button className="btn ghost" onClick={back}><Icon name="left" size={18} /></button>}
+            <button className="btn primary" style={{ flex: 1 }} disabled={!text.trim() || busy || !aiReady} onClick={run}>
+              {busy ? <span className="spinner" /> : <Icon name="sparkle" size={18} />} {tr("Разчети плана", "Read my plan")}
+            </button>
+          </>
         )
       }
     >
-      <div className="field">
-        <span>{tr("За кои дни", "For which days")}</span>
-        <div className="seg">
-          {(["strict", "oil", "fish"] as PlanType[]).map((t) => (
-            <button key={t} className={targets.includes(t) ? "on" : ""} onClick={() => setTargets(targets.includes(t) ? targets.filter((x) => x !== t) : [...targets, t])}>
-              <span className={`dot ${t}`} /> {DAY_META[t].short}
-            </button>
-          ))}
-        </div>
-      </div>
-      {!parsed || !parsed.length ? (
+      {!ready ? (
         <>
           <label className="field">
             <span>{tr("Напиши или постави плана си", "Write or paste your plan")}</span>
             <textarea id="plan-text" className="input" placeholder={placeholder()} value={text} onChange={(e) => setText(e.target.value)} />
           </label>
-          {ai && !ai.text && (
-            <div className="note">{tr("Разчитането на текст работи, когато приложението е отворено в Claude. Тук можеш да редактираш плана ръчно от екрана „План“.", "Reading the text works when the app is open in Claude. Here you can edit the plan by hand on the Plan screen.")}</div>
-          )}
-          <div className="tiny faint">{tr("AI разделя плана по хранения, свързва продуктите с библиотеката и добавя новите в нея.", "AI splits the plan into meals, links foods to your library and adds the new ones to it.")}</div>
+          <div className="tiny faint">{tr("AI разделя плана по хранения и свързва продуктите с библиотеката и базата с храни.", "AI splits the plan into meals and links foods to your library and the food database.")}</div>
         </>
       ) : (
         <>
-          <Summary m={grand} />
-          {preview.map((m, i) => (
-            <div key={i} className="card" style={{ boxShadow: "none", background: "var(--surface-2)" }}>
-              <div className="meal-head"><span className="h2">{m.name}</span><span className="meal-kcal">{fmtK(m.total.kcal)} kcal</span></div>
-              {m.items.map((it, j) => (
-                <div key={j} className="li" style={{ padding: "10px 18px", minHeight: 0 }}>
-                  <KindDot kind={it.kind} />
-                  <div className="grow name">{it.name}</div>
-                  <span className="small muted">{fmtQty(it.qty)} {UNIT_META[it.unit].label}</span>
-                </div>
-              ))}
-            </div>
-          ))}
+          <PlanName name={name} setName={setName} activate={activate} setActivate={setActivate} />
+          <TypePicker types={types} setTypes={setTypes} />
+          <Summary m={previewTotals(parsed).total} />
+          <MealsPreview parsed={parsed} />
         </>
       )}
       {err && <div className="note warn">{err}</div>}
+    </Sheet>
+  );
+}
+
+function GeneratePlan({ title, back, aiReady }: { title: string; back?: () => void; aiReady: boolean }) {
+  const open = useSheet();
+  const p = getState().profile;
+  const today = new Date();
+  const [name, setName] = useState(tr(`AI план · ${today.getDate()}.${today.getMonth() + 1}`, `AI plan · ${today.getDate()}/${today.getMonth() + 1}`));
+  const [activate, setActivate] = useState(true);
+  const [goal, setGoal] = useState({ kcal: p.kcal, p: p.p, c: p.c, f: p.f });
+  const [saveGoal, setSaveGoal] = useState(true);
+  const [meals, setMeals] = useState(4);
+  const [prefs, setPrefs] = useState("");
+  const [types, setTypes] = useState<PlanType[]>(PLAN_TYPES);
+  const [state, setStateMap] = useState<Partial<Record<PlanType, "busy" | "done" | "error">>>({});
+  const [result, setResult] = useState<Partial<Record<PlanType, ParsedMeal[]>>>({});
+  const [view, setView] = useState<PlanType>("fish");
+  const [err, setErr] = useState("");
+  const ctl = useRef<AbortController | null>(null);
+  useEffect(() => () => ctl.current?.abort(), []);
+  const busy = Object.values(state).includes("busy");
+  const done = types.filter((t) => result[t]?.length);
+  const macroKcal = Math.round(goal.p * 4 + goal.c * 4 + goal.f * 9);
+
+  async function run() {
+    setErr("");
+    setResult({});
+    ctl.current?.abort();
+    ctl.current = new AbortController();
+    const signal = ctl.current.signal;
+    const names = knownFoodNames();
+    setStateMap(Object.fromEntries(types.map((t) => [t, "busy"])));
+    setView(types.includes(view) ? view : types[0]);
+    // one request per kind of day, in parallel
+    await Promise.all(
+      types.map(async (t) => {
+        try {
+          const r = await generatePlanDay(t, { ...goal, meals, prefs }, names, signal);
+          setResult((x) => ({ ...x, [t]: r }));
+          setStateMap((x) => ({ ...x, [t]: r.length ? "done" : "error" }));
+        } catch (e) {
+          setStateMap((x) => ({ ...x, [t]: "error" }));
+          const msg = aiErrorText(e);
+          if (msg) setErr(msg);
+        }
+      }),
+    );
+  }
+
+  function save() {
+    if (saveGoal) actions.updateProfile({ kcal: Math.round(goal.kcal), p: Math.round(goal.p), c: Math.round(goal.c), f: Math.round(goal.f) });
+    savePlan(name, result, activate);
+    open(null);
+  }
+
+  const shown = result[view];
+  return (
+    <Sheet
+      title={title}
+      onClose={() => open(null)}
+      foot={
+        done.length && !busy ? (
+          <>
+            <button className="btn ghost" onClick={run}><Icon name="refresh" size={18} /></button>
+            <button className="btn primary" style={{ flex: 1 }} onClick={save}>{tr("Запази плана", "Save plan")}</button>
+          </>
+        ) : (
+          <>
+            {back && !busy && <button className="btn ghost" onClick={back}><Icon name="left" size={18} /></button>}
+            <button className="btn primary" style={{ flex: 1 }} disabled={busy || !types.length || !aiReady || !(goal.kcal > 0)} onClick={run}>
+              {busy ? <span className="spinner" /> : <Icon name="sparkle" size={18} />} {busy ? tr("Генерирам…", "Generating…") : tr("Генерирай", "Generate")}
+            </button>
+          </>
+        )
+      }
+    >
+      {!done.length && !busy ? (
+        <>
+          <div className="field">
+            <span>{tr("Цел за деня", "Daily target")}</span>
+            <div className="grid2" style={{ gridTemplateColumns: "1.3fr 1fr 1fr 1fr" }}>
+              <label className="field"><span>kcal</span><NumberInput id="g-kcal" value={goal.kcal} onChange={(v) => setGoal({ ...goal, kcal: v })} /></label>
+              <label className="field"><span className="t-p">{tr("П", "P")}</span><NumberInput id="g-p" value={goal.p} onChange={(v) => setGoal({ ...goal, p: v })} /></label>
+              <label className="field"><span className="t-c">{tr("В", "C")}</span><NumberInput id="g-c" value={goal.c} onChange={(v) => setGoal({ ...goal, c: v })} /></label>
+              <label className="field"><span className="t-f">{tr("М", "F")}</span><NumberInput id="g-f" value={goal.f} onChange={(v) => setGoal({ ...goal, f: v })} /></label>
+            </div>
+            <span className="tiny faint" style={{ fontWeight: 500 }}>{tr(`Макросите дават ${macroKcal} kcal`, `Macros add up to ${macroKcal} kcal`)}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div style={{ fontWeight: 600 }}>{tr("Запиши и като моя дневна цел", "Also save as my daily goal")}</div>
+            <Switch on={saveGoal} onChange={setSaveGoal} label={tr("Запиши и като моя дневна цел", "Also save as my daily goal")} />
+          </div>
+          <div className="field">
+            <span>{tr("Хранения на ден", "Meals a day")}</span>
+            <div className="seg">
+              {[3, 4, 5].map((n) => (
+                <button key={n} className={meals === n ? "on" : ""} onClick={() => setMeals(n)}>{n}</button>
+              ))}
+            </div>
+          </div>
+          <TypePicker types={types} setTypes={setTypes} />
+          <label className="field">
+            <span>{tr("Предпочитания (по желание)", "Preferences (optional)")}</span>
+            <textarea
+              id="plan-prefs"
+              className="input"
+              style={{ minHeight: 90 }}
+              placeholder={tr("напр. обичам леща и тофу, без гъби, лесни рецепти, обядвам навън", "e.g. I like lentils and tofu, no mushrooms, quick recipes, I eat lunch out")}
+              value={prefs}
+              onChange={(e) => setPrefs(e.target.value)}
+            />
+          </label>
+          <div className="tiny faint">{tr("AI спазва правилата за всеки вид ден и използва храни от базата, където може. Отнема около минута.", "AI follows the fasting rule for each kind of day and uses foods from the database where it can. Takes about a minute.")}</div>
+        </>
+      ) : (
+        <>
+          <div className="seg" role="tablist">
+            {types.map((t) => (
+              <button key={t} role="tab" aria-selected={view === t} className={view === t ? "on" : ""} onClick={() => setView(t)}>
+                {state[t] === "busy" ? <span className="spinner" style={{ width: 12, height: 12 }} /> : <span className={`dot ${t}`} />} {DAY_META[t].short}
+              </button>
+            ))}
+          </div>
+          {state[view] === "busy" && (
+            <div className="thinking">
+              <span className="spinner" />
+              <div>
+                <b>{tr(`Генерирам ${DAY_META[view].title.toLowerCase()}…`, `Generating a ${DAY_META[view].title.toLowerCase()}…`)}</b>
+                <div className="small muted">{tr("Обикновено отнема 30–60 секунди", "Usually takes 30–60 seconds")}</div>
+              </div>
+            </div>
+          )}
+          {state[view] === "error" && <div className="note warn">{tr("Този ден не се генерира. Натисни ↻, за да опиташ пак.", "This day didn't generate. Tap ↻ to try again.")}</div>}
+          {shown?.length ? (
+            <>
+              <TargetCheck m={previewTotals(shown).total} goal={goal} />
+              <MealsPreview parsed={shown} />
+              {!busy && <PlanName name={name} setName={setName} activate={activate} setActivate={setActivate} />}
+            </>
+          ) : null}
+        </>
+      )}
+      {err && <div className="note warn">{err}</div>}
+    </Sheet>
+  );
+}
+
+/** Day total next to the target, so the AI's accuracy is visible */
+function TargetCheck({ m, goal }: { m: { kcal: number; p: number; c: number; f: number }; goal: { kcal: number; p: number; c: number; f: number } }) {
+  const cell = (label: string, v: number, g: number, cls: string, unit: string) => (
+    <div>
+      <b className={cls}>{fmtK(v)}</b>
+      <span>{label} / {fmtK(g)}{unit}</span>
+    </div>
+  );
+  return (
+    <div className="summary">
+      {cell("kcal", m.kcal, goal.kcal, "", "")}
+      {cell(tr("протеин", "protein"), m.p, goal.p, "t-p", "")}
+      {cell(tr("въглехидр.", "carbs"), m.c, goal.c, "t-c", "")}
+      {cell(tr("мазнини", "fat"), m.f, goal.f, "t-f", "")}
+    </div>
+  );
+}
+
+/* ───────── daily goal ───────── */
+
+export function GoalSheet() {
+  const open = useSheet();
+  const s = getState();
+  const [g, setG] = useState({ kcal: s.profile.kcal, p: s.profile.p, c: s.profile.c, f: s.profile.f });
+  const macroKcal = Math.round(g.p * 4 + g.c * 4 + g.f * 9);
+  const plan = activePlan(s);
+  const split = () => setG({ ...g, p: Math.round((g.kcal * 0.3) / 4), c: Math.round((g.kcal * 0.45) / 4), f: Math.round((g.kcal * 0.25) / 9) });
+  return (
+    <Sheet
+      title={tr("Дневна цел", "Daily goal")}
+      onClose={() => open(null)}
+      foot={
+        <button
+          className="btn primary block"
+          disabled={!(g.kcal > 0)}
+          onClick={() => {
+            actions.updateProfile({ kcal: Math.round(g.kcal), p: Math.round(g.p), c: Math.round(g.c), f: Math.round(g.f) });
+            toast(tr("Целта е обновена", "Goal updated"));
+            open(null);
+          }}
+        >
+          {tr("Запази", "Save")}
+        </button>
+      }
+    >
+      <label className="field">
+        <span>{tr("Калории", "Calories")}</span>
+        <NumberInput id="goal-kcal" value={g.kcal} onChange={(v) => setG({ ...g, kcal: v })} suffix="kcal" />
+      </label>
+      <div className="grid2" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+        <label className="field"><span className="t-p">{tr("Протеин", "Protein")}</span><NumberInput id="goal-p" value={g.p} onChange={(v) => setG({ ...g, p: v })} suffix={tr("г", "g")} /></label>
+        <label className="field"><span className="t-c">{tr("Въглехидр.", "Carbs")}</span><NumberInput id="goal-c" value={g.c} onChange={(v) => setG({ ...g, c: v })} suffix={tr("г", "g")} /></label>
+        <label className="field"><span className="t-f">{tr("Мазнини", "Fat")}</span><NumberInput id="goal-f" value={g.f} onChange={(v) => setG({ ...g, f: v })} suffix={tr("г", "g")} /></label>
+      </div>
+      <div className="sec-head" style={{ padding: 0 }}>
+        <span className="tiny faint">{tr(`Макросите дават ${macroKcal} kcal`, `Macros add up to ${macroKcal} kcal`)}</span>
+        <button className="btn sm ghost" onClick={split}>{tr("Раздели 30/45/25", "Split 30/45/25")}</button>
+      </div>
+      {plan && (
+        <div className="card" style={{ boxShadow: "none", background: "var(--surface-2)" }}>
+          <div className="li" style={{ minHeight: 0, padding: "12px 18px" }}>
+            <span className="grow small muted">{tr(`„${plan.name}“ дава`, `“${plan.name}” gives`)}</span>
+          </div>
+          {PLAN_TYPES.map((t) => {
+            const m = sum(plan.days[t].flatMap((meal) => meal.items.map(itemMacros)));
+            return (
+              <div key={t} className="li" style={{ minHeight: 0, padding: "8px 18px" }}>
+                <span className={`dot ${t}`} style={{ width: 8, height: 8, borderRadius: "50%" }} />
+                <span className="grow small">{DAY_META[t].title}</span>
+                <span className="small" style={{ fontWeight: 700 }}>{fmtK(m.kcal)} kcal</span>
+                <MacroLine m={m} />
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Sheet>
   );
 }
@@ -964,11 +1323,12 @@ export function SheetHost({ sheet }: { sheet: SheetState | null }) {
     case "qty": return <QtySheet key={sheet.food.id} target={sheet.target} food={sheet.food} />;
     case "food": return <FoodSheet key={sheet.food?.id ?? "new"} food={sheet.food} then={sheet.then} />;
     case "entry": return <EntrySheet date={sheet.date} entry={sheet.entry} />;
-    case "planItem": return <PlanItemSheet plan={sheet.plan} item={sheet.item} />;
+    case "planItem": return <PlanItemSheet planId={sheet.planId} plan={sheet.plan} item={sheet.item} />;
     case "scan": return <ScanSheet target={sheet.target} file={sheet.file} />;
     case "barcode": return <BarcodeSheet target={sheet.target} code={sheet.code} file={sheet.file} />;
     case "live": return <LiveSheet target={sheet.target} />;
-    case "newplan": return <NewPlanSheet plan={sheet.plan} />;
+    case "newplan": return <NewPlanSheet mode={sheet.mode} />;
+    case "goal": return <GoalSheet />;
     case "daytype": return <DayTypeSheet date={sheet.date} />;
   }
 }

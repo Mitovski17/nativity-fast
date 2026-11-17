@@ -1,6 +1,7 @@
-import type { Food, Item, Kind, Meal, Plans, Profile, State, Unit } from "./types";
+import type { Food, Item, Kind, Meal, MealPlan, Plans, Profile, State, Unit } from "./types";
 import { itemFromFood, uid } from "./nutrition";
 import { getLang, type Lang } from "./i18n";
+import { dbById } from "./foodsdb";
 
 type Row = [id: string, bg: string, en: string, kind: Kind, kcal: number, p: number, c: number, f: number, units?: Partial<Record<Unit, number>>];
 
@@ -94,9 +95,38 @@ export function defaultProfile(): Profile {
   };
 }
 
+export const EXAMPLE_PLAN_ID = "example";
+const EXAMPLE_NAMES: Record<Lang, string> = { bg: "Примерен план", en: "Example plan" };
+
 export function initialState(): State {
   const foods = seedFoods();
-  return { v: 1, profile: defaultProfile(), foods, plans: seedPlans(foods), days: {} };
+  const example: MealPlan = { id: EXAMPLE_PLAN_ID, name: EXAMPLE_NAMES[getLang()], days: seedPlans(foods), example: true, createdAt: Date.now() };
+  return { v: 1, profile: { ...defaultProfile(), activePlan: EXAMPLE_PLAN_ID }, foods, plans: { [EXAMPLE_PLAN_ID]: example }, days: {} };
+}
+
+/**
+ * Brings saved data up to date. Before the plan library there was one plan:
+ * `plans` held the meals for each day type directly. It becomes the first plan in the library.
+ */
+export function migrate(s: State): State {
+  const legacy = s.plans as unknown as Partial<Plans>;
+  let next = s;
+  if (legacy && Array.isArray(legacy.strict)) {
+    const example = s.profile.planIsExample !== false;
+    const plan: MealPlan = {
+      id: example ? EXAMPLE_PLAN_ID : "main",
+      // runs while the saved data loads, before the app language is set from it
+      name: example ? EXAMPLE_NAMES[s.profile.lang ?? getLang()] : (s.profile.lang ?? getLang()) === "en" ? "My plan" : "Моят план",
+      days: { strict: legacy.strict ?? [], oil: legacy.oil ?? [], fish: legacy.fish ?? [] },
+      example,
+      createdAt: Date.now(),
+    };
+    next = { ...s, plans: { [plan.id]: plan }, profile: { ...s.profile, activePlan: plan.id } };
+  }
+  if (next.profile.activePlan === undefined) {
+    next = { ...next, profile: { ...next.profile, activePlan: Object.keys(next.plans)[0] ?? null } };
+  }
+  return next;
 }
 
 /* ───────── language switch for the built-in names ───────── */
@@ -121,7 +151,7 @@ export function relocalize(s: State, from: Lang, to: Lang): State {
     return i < 0 ? name : MEAL_NAMES[to][i];
   };
   const food = (foodId: string | undefined, name: string) => {
-    const n = foodId ? SEED_NAMES[foodId] : undefined;
+    const n = foodId ? SEED_NAMES[foodId] ?? dbById(foodId)?.names : undefined;
     return n && n[from] === name ? n[to] : name;
   };
   const item = <T extends Item>(it: T): T => {
@@ -129,10 +159,12 @@ export function relocalize(s: State, from: Lang, to: Lang): State {
     return name === it.name ? it : { ...it, name };
   };
   const foods: Record<string, Food> = {};
-  for (const [id, f] of Object.entries(s.foods)) foods[id] = f.source === "seed" ? { ...f, name: food(id, f.name) } : f;
-  const plans = Object.fromEntries(
-    Object.entries(s.plans).map(([t, meals]) => [t, meals.map((m) => ({ ...m, name: meal(m.name), items: m.items.map(item) }))]),
-  ) as Plans;
+  for (const [id, f] of Object.entries(s.foods)) foods[id] = f.source === "seed" || f.source === "db" ? { ...f, name: food(id, f.name) } : f;
+  const days_ = (d: Plans) =>
+    Object.fromEntries(Object.entries(d).map(([t, meals]) => [t, meals.map((m) => ({ ...m, name: meal(m.name), items: m.items.map(item) }))])) as Plans;
+  const plans: Record<string, MealPlan> = {};
+  for (const [id, p] of Object.entries(s.plans))
+    plans[id] = { ...p, name: p.example && p.name === EXAMPLE_NAMES[from] ? EXAMPLE_NAMES[to] : p.name, days: days_(p.days) };
   const days = Object.fromEntries(
     Object.entries(s.days).map(([d, day]) => [d, { ...day, entries: day.entries.map((e) => ({ ...item(e), meal: meal(e.meal) })) }]),
   );

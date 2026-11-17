@@ -49,7 +49,7 @@ export function Library() {
         </MealPhotoAction>
       </div>
       <section className="card">
-        <LibraryList query={q} kindFilter={kind} onPick={(food) => open({ k: "food", food })} />
+        <LibraryList query={q} kindFilter={kind} withDb onPick={(food) => open({ k: "food", food })} />
       </section>
       <div className="tiny faint" style={{ textAlign: "center" }}>{tr("Всяка храна, която добавиш, сканираш или снимаш, се запазва тук.", "Every food you add, scan or photograph is saved here.")}</div>
     </div>

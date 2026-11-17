@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { tr } from "../lib/i18n";
 import type { Entry } from "../lib/types";
-import { actions, dayView, mealOrder, useStore } from "../lib/store";
+import { actions, activePlan, dayView, mealOrder, useStore } from "../lib/store";
 import {
   DAY_META, FAST_DAYS, FEASTS, MONTHS, NOTES, WD_SHORT, addDays, allowedKinds, dayType, fastDayNumber, inFast, longDate,
   parseISO, todayISO, weekStart, FAST_START, dayMonth,
@@ -141,6 +141,7 @@ export function Home({ date, setDate }: { date: string; setDate: (d: string) => 
   const eaten = sum(entries.filter((e) => e.done).map(itemMacros));
   const planned = sum(entries.map(itemMacros));
   const today = todayISO();
+  const plan = activePlan(s);
 
   return (
     <div className="screen">
@@ -161,7 +162,7 @@ export function Home({ date, setDate }: { date: string; setDate: (d: string) => 
         <div className="cal">
           <Ring value={eaten.kcal} goal={s.profile.kcal} />
           <div className="calstats">
-            <div className="stat"><span className="muted small">{tr("Цел", "Goal")}</span><b>{fmtK(s.profile.kcal)}</b></div>
+            <button className="stat stat-btn" onClick={() => open({ k: "goal" })} aria-label={tr("Промени дневната цел", "Change the daily goal")}><span className="muted small">{tr("Цел", "Goal")} <Icon name="pen" size={12} /></span><b>{fmtK(s.profile.kcal)}</b></button>
             <div className="stat"><span className="muted small">{tr("Изядено", "Eaten")}</span><b>{fmtK(eaten.kcal)}</b></div>
             <div className="stat"><span className="muted small">{tr("По план", "Planned")}</span><b className="muted">{fmtK(planned.kcal)}</b></div>
           </div>
@@ -169,7 +170,14 @@ export function Home({ date, setDate }: { date: string; setDate: (d: string) => 
         <MacroBars m={eaten} goal={s.profile} />
       </section>
 
-      {s.profile.planIsExample && type !== "free" && (
+      {!plan && (
+        <div className="note" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <span style={{ color: "var(--ink)" }}><Icon name="pen" size={18} /></span>
+          <span>{tr("Ръчно проследяване: добавяй храните с „+“ или от всяко хранене. Планът може да се включи от „План“.", "Manual tracking: add foods with “+” or under each meal. You can switch a plan on under “Plan”.")}</span>
+        </div>
+      )}
+
+      {plan?.example && type !== "free" && (
         <div className="note" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
           <span style={{ color: "var(--ink)" }}><Icon name="sparkle" size={18} /></span>
           <span>{tr("Това е примерен план. Въведи своя в „План“ и денят ще се попълва с твоите храни.", "This is an example plan. Enter yours under “Plan” and every day fills with your own foods.")}</span>

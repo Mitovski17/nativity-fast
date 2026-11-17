@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
-import type { Day, DayType, Entry, Food, Item, Meal, PlanType, Plans, Profile, State } from "./types";
-import { defaultMeals, initialState, relocalize } from "./seed";
+import type { Day, DayType, Entry, Food, Item, Meal, MealPlan, PlanType, Plans, Profile, State } from "./types";
+import { defaultMeals, initialState, migrate, relocalize } from "./seed";
 import { detectLang, getLang, setLang, type Lang } from "./i18n";
 import { dayType } from "./fast";
 import { uid } from "./nutrition";
@@ -17,7 +17,7 @@ function loadLocal(): State | null {
     const raw = localStorage.getItem(lsKey);
     if (!raw) return null;
     const s = JSON.parse(raw) as State;
-    return s && s.v === 1 ? s : null;
+    return s && s.v === 1 ? migrate(s) : null;
   } catch {
     return null;
   }
@@ -190,7 +190,7 @@ function applyRemote(docs: { key: string; data: Record<string, unknown> }[]) {
     else if (d.key.startsWith("log-") && data.days) Object.assign(remoteDays, data.days);
   }
   next.days = { ...state.days, ...remoteDays };
-  state = next;
+  state = migrate(next);
   syncLang(next);
   saveLocal(next);
   emit();
@@ -295,21 +295,30 @@ export function closeUser(forget = false) {
 const toEntries = (meals: Meal[]): Entry[] =>
   meals.flatMap((m) => m.items.map((it) => ({ ...it, meal: m.name, done: false })));
 
-export function planFor(t: DayType, plans: Plans): Meal[] {
-  return t === "free" ? [] : plans[t];
+/** The plan that fills untouched days, or null in manual tracking mode */
+export function activePlan(s: State): MealPlan | null {
+  const id = s.profile.activePlan;
+  return id ? s.plans[id] ?? null : null;
 }
+
+export function planFor(t: DayType, s: State): Meal[] {
+  const p = activePlan(s);
+  return t === "free" || !p ? [] : p.days[t] ?? [];
+}
+
+const cloneMeals = (meals: Meal[]): Meal[] => meals.map((m) => ({ ...m, id: uid(), items: m.items.map((i) => ({ ...i, id: uid() })) }));
 
 /** The stored day, or a virtual one built from the plan until the person touches it */
 export function dayView(s: State, date: string): { entries: Entry[]; stored: boolean; type: DayType } {
   const type = dayType(date, s.profile);
   const d = s.days[date];
   if (d) return { entries: d.entries, stored: true, type };
-  return { entries: toEntries(planFor(type, s.plans)), stored: false, type };
+  return { entries: toEntries(planFor(type, s)), stored: false, type };
 }
 
 export function mealOrder(s: State, date: string, entries: Entry[]): string[] {
   const type = dayType(date, s.profile);
-  const names = planFor(type, s.plans).map((m) => m.name);
+  const names = planFor(type, s).map((m) => m.name);
   const base = names.length ? names : defaultMeals();
   const extra = entries.map((e) => e.meal).filter((m) => !base.includes(m));
   return [...base, ...Array.from(new Set(extra))];
@@ -346,21 +355,58 @@ export const actions = {
     });
   },
 
-  /* plans */
-  setPlanMeals(plan: PlanType, meals: Meal[]) {
-    setState((s) => ({ ...s, plans: { ...s.plans, [plan]: meals } }));
+  /* plan library */
+  /** Saves a new plan; with activate it starts filling the days right away */
+  addPlan(name: string, days: Plans, activate: boolean): string {
+    const id = uid();
+    setState((s) => ({
+      ...s,
+      plans: { ...s.plans, [id]: { id, name, days, createdAt: Date.now() } },
+      profile: activate ? { ...s.profile, activePlan: id, planIsExample: false } : s.profile,
+    }));
+    return id;
   },
-  editPlan(plan: PlanType, fn: (meals: Meal[]) => Meal[]) {
-    setState((s) => ({ ...s, plans: { ...s.plans, [plan]: fn(s.plans[plan]) } }));
+  /** null switches to manual tracking: days start empty */
+  setActivePlan(id: string | null) {
+    setState((s) => ({ ...s, profile: { ...s.profile, activePlan: id } }));
   },
-  addPlanItems(plan: PlanType, mealId: string, items: Item[]) {
-    actions.editPlan(plan, (ms) => ms.map((m) => (m.id === mealId ? { ...m, items: [...m.items, ...items.map((i) => ({ ...i, id: uid() }))] } : m)));
+  renamePlan(id: string, name: string) {
+    setState((s) => (s.plans[id] ? { ...s, plans: { ...s.plans, [id]: { ...s.plans[id], name } } } : s));
   },
-  updatePlanItem(plan: PlanType, item: Item) {
-    actions.editPlan(plan, (ms) => ms.map((m) => ({ ...m, items: m.items.map((i) => (i.id === item.id ? item : i)) })));
+  duplicatePlan(id: string, name: string): string | null {
+    const src = getState().plans[id];
+    if (!src) return null;
+    return actions.addPlan(name, { strict: cloneMeals(src.days.strict), oil: cloneMeals(src.days.oil), fish: cloneMeals(src.days.fish) }, false);
   },
-  removePlanItem(plan: PlanType, id: string) {
-    actions.editPlan(plan, (ms) => ms.map((m) => ({ ...m, items: m.items.filter((i) => i.id !== id) })));
+  deletePlan(id: string) {
+    setState((s) => {
+      const plans = { ...s.plans };
+      delete plans[id];
+      return { ...s, plans, profile: s.profile.activePlan === id ? { ...s.profile, activePlan: null } : s.profile };
+    });
+  },
+  setPlanMeals(planId: string, plan: PlanType, meals: Meal[]) {
+    actions.editPlan(planId, plan, () => meals);
+  },
+  copyPlanDay(planId: string, from: PlanType, to: PlanType) {
+    actions.editPlan(planId, to, () => cloneMeals(getState().plans[planId]?.days[from] ?? []));
+  },
+  editPlan(planId: string, plan: PlanType, fn: (meals: Meal[]) => Meal[]) {
+    setState((s) => {
+      const p = s.plans[planId];
+      if (!p) return s;
+      // editing the example makes it the person's own plan
+      return { ...s, plans: { ...s.plans, [planId]: { ...p, example: false, days: { ...p.days, [plan]: fn(p.days[plan] ?? []) } } } };
+    });
+  },
+  addPlanItems(planId: string, plan: PlanType, mealId: string, items: Item[]) {
+    actions.editPlan(planId, plan, (ms) => ms.map((m) => (m.id === mealId ? { ...m, items: [...m.items, ...items.map((i) => ({ ...i, id: uid() }))] } : m)));
+  },
+  updatePlanItem(planId: string, plan: PlanType, item: Item) {
+    actions.editPlan(planId, plan, (ms) => ms.map((m) => ({ ...m, items: m.items.map((i) => (i.id === item.id ? item : i)) })));
+  },
+  removePlanItem(planId: string, plan: PlanType, id: string) {
+    actions.editPlan(planId, plan, (ms) => ms.map((m) => ({ ...m, items: m.items.filter((i) => i.id !== id) })));
   },
 
   /* library */

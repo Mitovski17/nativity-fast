@@ -3,7 +3,7 @@ export type Unit = "g" | "ml" | "cup" | "tbsp" | "tsp" | "pc" | "serving";
 export type DayType = "strict" | "oil" | "fish" | "free";
 export type PlanType = Exclude<DayType, "free">;
 export type RuleSet = "typikon" | "weekend";
-export type Source = "seed" | "manual" | "barcode" | "ai";
+export type Source = "seed" | "manual" | "barcode" | "ai" | "db";
 
 export interface Macros {
   kcal: number;
@@ -48,7 +48,18 @@ export interface Meal {
   items: Item[];
 }
 
+/** The meals of one plan for each kind of fasting day */
 export type Plans = Record<PlanType, Meal[]>;
+
+/** A saved meal plan; at most one is active and fills untouched days */
+export interface MealPlan {
+  id: string;
+  name: string;
+  days: Plans;
+  /** the built-in example the app starts with */
+  example?: boolean;
+  createdAt: number;
+}
 
 export interface Day {
   date: string;
@@ -65,6 +76,8 @@ export interface Profile {
   seafoodOnOil: boolean;
   overrides: Record<string, DayType>;
   planIsExample: boolean;
+  /** id of the plan that fills the days; null = manual tracking (no plan) */
+  activePlan?: string | null;
   /** UI language; missing on profiles made before the English version */
   lang?: "bg" | "en";
 }
@@ -73,10 +86,10 @@ export interface State {
   v: 1;
   profile: Profile;
   foods: Record<string, Food>;
-  plans: Plans;
+  plans: Record<string, MealPlan>;
   days: Record<string, Day>;
 }
 
 export type Target =
   | { to: "day"; date: string; meal: string }
-  | { to: "plan"; plan: PlanType; mealId: string };
+  | { to: "plan"; planId: string; plan: PlanType; mealId: string };
