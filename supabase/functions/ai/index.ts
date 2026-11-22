@@ -5,7 +5,9 @@ import Anthropic from "npm:@anthropic-ai/sdk";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { SECRET_KEY, SUPABASE_URL, caller, cors, json } from "../_shared/auth.ts";
 
-const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") });
+// The project's secret was saved as "ANTHROPIC_API_KE" (last letter missing); both names work.
+const API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? Deno.env.get("ANTHROPIC_API_KE");
+const anthropic = new Anthropic({ apiKey: API_KEY });
 
 const MODEL = "claude-opus-5-5";
 const MEDIA = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
@@ -22,7 +24,7 @@ interface Body {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "method" }, 405);
-  if (!Deno.env.get("ANTHROPIC_API_KEY")) return json({ error: "not_configured" }, 503);
+  if (!API_KEY) return json({ error: "not_configured" }, 503);
 
   const who = await caller(req);
   if (who instanceof Response) return who;
