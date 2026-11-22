@@ -191,7 +191,8 @@ export function Home({ date, setDate, onProfile }: { date: string; setDate: (d: 
         const list = entries.filter((e) => e.meal === meal);
         const allDone = list.length > 0 && list.every((e) => e.done);
         const mk = sum(list.filter((e) => e.done).map(itemMacros)).kcal;
-        const mt = sum(list.map(itemMacros)).kcal;
+        const total = sum(list.map(itemMacros));
+        const mt = total.kcal;
         return (
           <section key={meal} className="card meal">
             <div className="meal-head">
@@ -201,9 +202,12 @@ export function Home({ date, setDate, onProfile }: { date: string; setDate: (d: 
                 )}
                 {meal}
               </span>
-              <span className="meal-kcal">
-                {list.length ? `${fmtK(mk)} / ${fmtK(mt)} kcal` : ""}
-              </span>
+              {list.length > 0 && (
+                <span className="meal-tot">
+                  <span className="meal-kcal">{`${fmtK(mk)} / ${fmtK(mt)} kcal`}</span>
+                  <MacroLine m={total} />
+                </span>
+              )}
             </div>
             {list.map((e) => (
               <EntryRow key={e.id} e={e} ok={allowed.includes(e.kind)} onToggle={() => actions.toggle(date, e.id)} onOpen={() => open({ k: "entry", date, entry: e })} />

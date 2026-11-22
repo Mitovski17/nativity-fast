@@ -30,6 +30,31 @@ function saveLocal(s: State) {
     /* storage unavailable: the cloud copy or memory still holds it */
   }
 }
+/**
+ * Documents changed on this device but not yet uploaded. Kept on the device too, so closing the app
+ * before the upload finishes can't let the older cloud copy overwrite the change on the next start.
+ */
+const pendingKey = () => (lsKey ? `${lsKey}:pending` : null);
+function savePending() {
+  const k = pendingKey();
+  if (!k) return;
+  try {
+    if (dirty.size) localStorage.setItem(k, JSON.stringify([...dirty]));
+    else localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable */
+  }
+}
+function restorePending() {
+  const k = pendingKey();
+  if (!k) return;
+  try {
+    const keys = JSON.parse(localStorage.getItem(k) ?? "[]") as unknown;
+    if (Array.isArray(keys)) keys.forEach((x) => typeof x === "string" && dirty.add(x));
+  } catch {
+    /* nothing pending */
+  }
+}
 function storedLang(): Lang | null {
   try {
     const l = localStorage.getItem(LANG_KEY);
@@ -108,6 +133,8 @@ let ready = false;
 const dirty = new Set<string>();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let flushing: Promise<void> | null = null;
+/** Bumped when the account/session changes, so an old upload finishing late can't clear the new one's marker */
+let flushGen = 0;
 let lastPull = 0;
 
 function markDirty(prev: State, next: State) {
@@ -121,6 +148,7 @@ function markDirty(prev: State, next: State) {
       if (prev.days[d] !== next.days[d]) dirty.add("log-" + d.slice(0, 7));
     });
   }
+  savePending();
   schedule();
 }
 
@@ -145,6 +173,7 @@ function flush(): Promise<void> {
   if (!remote) return Promise.resolve();
   if (flushing) return flushing;
   const r = remote;
+  const gen = flushGen;
   flushing = (async () => {
     setSync("saving");
     try {
@@ -153,6 +182,7 @@ function flush(): Promise<void> {
         dirty.delete(key);
         try {
           await r.save(key, body(key));
+          savePending();
         } catch (e) {
           dirty.add(key);
           throw e;
@@ -166,12 +196,21 @@ function flush(): Promise<void> {
       timer = setTimeout(flush, 15000); // try again later; the local copy keeps everything meanwhile
       return;
     } finally {
-      flushing = null;
+      if (gen === flushGen) flushing = null;
     }
     if (dirty.size && remote === r) schedule();
   })();
   return flushing;
 }
+
+// Upload straight away when the app goes to the background (phones often close it from there)
+if (typeof document !== "undefined")
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && ready && dirty.size) {
+      clearTimeout(timer);
+      void flush();
+    }
+  });
 
 /** Saves anything still waiting, e.g. before signing out */
 export async function flushNow() {
@@ -180,11 +219,12 @@ export async function flushNow() {
   if (dirty.size) await flush();
 }
 
-/** Remote copy wins per document; days merge, remote days replacing local ones */
+/** Remote copy wins per document, except documents changed here and not uploaded yet; days merge, remote days replacing local ones */
 function applyRemote(docs: { key: string; data: Record<string, unknown> }[]) {
   const next: State = { ...state, days: { ...state.days } };
   const remoteDays: Record<string, Day> = {};
   for (const d of docs) {
+    if (dirty.has(d.key)) continue; // this device's newer copy is still on its way up
     const data = structuredClone(d.data ?? {}) as Record<string, any>;
     if (d.key === "profile" && data.profile) next.profile = { ...state.profile, lang: "bg", ...data.profile };
     else if (d.key === "plans" && data.plans) next.plans = data.plans;
@@ -202,6 +242,7 @@ function applyRemote(docs: { key: string; data: Record<string, unknown> }[]) {
 async function startSync(r: Remote) {
   remote = r;
   ready = false;
+  restorePending();
   setSync("connecting");
   try {
     const docs = await r.load();
@@ -266,6 +307,8 @@ export async function openUser(userId: string, r: Remote) {
   ready = false;
   dirty.clear();
   clearTimeout(timer);
+  flushing = null; // an upload stuck from the previous account/session must not block this one
+  flushGen++;
   lsKey = `${BASE_KEY}:${userId}`;
   state = loadLocal() ?? initialState();
   syncLang(state);
@@ -278,6 +321,7 @@ export function closeUser(forget = false) {
   if (forget && lsKey) {
     try {
       localStorage.removeItem(lsKey);
+      localStorage.removeItem(`${lsKey}:pending`);
     } catch {
       /* nothing cached */
     }
@@ -286,6 +330,8 @@ export function closeUser(forget = false) {
   ready = false;
   dirty.clear();
   clearTimeout(timer);
+  flushing = null;
+  flushGen++;
   lsKey = null;
   state = initialState();
   setSync("local");

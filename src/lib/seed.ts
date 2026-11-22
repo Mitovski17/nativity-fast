@@ -142,6 +142,12 @@ export const defaultMeals = () => MEAL_NAMES[getLang()];
 
 const SEED_NAMES: Record<string, Record<Lang, string>> = Object.fromEntries(ROWS.map(([id, bg, en]) => [id, { bg, en }]));
 
+/** Every name a food answers to in search: its own, plus both languages' names for built-in and database foods */
+export function searchNames(f: Food): string[] {
+  const n = f.source === "seed" ? SEED_NAMES[f.id] : f.source === "db" ? dbById(f.id)?.names : undefined;
+  return n ? [f.name, n.bg, n.en] : [f.name];
+}
+
 /**
  * Renames the built-in foods and meal names the person has not changed,
  * so switching language does not leave the example data in the old one.

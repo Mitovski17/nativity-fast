@@ -1,4 +1,4 @@
-// Built-in database of ~170 basic foods (USDA FoodData Central, SR Legacy, public domain).
+// Built-in database of ~200 basic foods (USDA FoodData Central, SR Legacy, public domain).
 // Rebuild with scripts/build-foods.mjs; names are Bulgarian and English.
 import raw from "./foods-db.json";
 import type { Food, Kind, Unit } from "./types";

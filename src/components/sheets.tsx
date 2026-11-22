@@ -9,6 +9,7 @@ import { CameraInput, LiveScanner } from "./Scanner";
 import { Icon, KindDot, MacroLine, NumberInput, Sheet, Summary, Switch, toast } from "./ui";
 import { getLang, tr } from "../lib/i18n";
 import { DB, dbByName, dbName, dbToFood, norm, searchDb } from "../lib/foodsdb";
+import { searchNames } from "../lib/seed";
 
 export type SheetState =
   | { k: "add"; target: Target; quick?: boolean }
@@ -135,7 +136,7 @@ export function AddSheet({ target, quick }: { target: Target; quick?: boolean })
           <span className="ic"><Icon name="book" /></span>
           <span>
             <b>{tr("Библиотека", "Library")}</b>
-            <small>{tr(`${Object.keys(getState().foods).length} запазени храни`, `${Object.keys(getState().foods).length} saved foods`)}</small>
+            <small>{tr(`${Object.keys(getState().foods).length} твои + ${DB.length} основни храни`, `${Object.keys(getState().foods).length} yours + ${DB.length} basic foods`)}</small>
           </span>
         </button>
         <button className="action" onClick={() => open({ k: "food", then: target })}>
@@ -185,14 +186,15 @@ export function LibraryList({ onPick, query, kindFilter, withDb }: { onPick: (f:
   const list = useMemo(() => {
     const q = norm(query);
     return Object.values(foods)
-      .filter((f) => (!q || norm(f.name).includes(q) || (f.brand && norm(f.brand).includes(q)) || f.barcode === query.trim()) && (!kindFilter || f.kind === kindFilter))
+      .filter((f) => (!q || searchNames(f).some((n) => norm(n).includes(q)) || (f.brand && norm(f.brand).includes(q)) || f.barcode === query.trim()) && (!kindFilter || f.kind === kindFilter))
       .sort((a, b) => (b.source === "seed" ? 0 : 1) - (a.source === "seed" ? 0 : 1) || a.name.localeCompare(b.name, getLang()));
   }, [foods, query, kindFilter]);
   const fromDb = useMemo(() => {
-    if (!withDb || !query.trim()) return [];
+    if (!withDb) return [];
     // a database food already in the library (same id or same name) shows only once
-    const saved = new Set(Object.values(foods).map((f) => norm(f.name)));
-    return searchDb(query, 40)
+    const saved = new Set(Object.values(foods).flatMap((f) => searchNames(f).map(norm)));
+    // with nothing typed, the whole database is listed under the person's own foods, so basics are one tap away
+    return (query.trim() ? searchDb(query, 40) : DB)
       .filter((d) => !foods[d.id] && !saved.has(norm(d.names.bg)) && !saved.has(norm(d.names.en)) && (!kindFilter || d.kind === kindFilter))
       .map(dbToFood);
   }, [withDb, query, foods, kindFilter]);
@@ -200,7 +202,7 @@ export function LibraryList({ onPick, query, kindFilter, withDb }: { onPick: (f:
   return (
     <div className="list">
       {[...list, ...fromDb].map((f, i) => (
-        <FoodRow key={f.id} f={f} onPick={onPick} header={i === list.length && fromDb.length ? tr(`База с храни · ${DB.length}`, `Food database · ${DB.length}`) : undefined} />
+        <FoodRow key={f.id} f={f} onPick={onPick} header={i === list.length && fromDb.length ? tr(`Основни храни · ${fromDb.length}`, `Basic foods · ${fromDb.length}`) : undefined} />
       ))}
     </div>
   );

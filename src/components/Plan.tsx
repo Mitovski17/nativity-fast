@@ -214,7 +214,10 @@ function PlanDetail({ plan, onBack }: { plan: MealPlan; onBack: () => void }) {
                 <button className="h2" onClick={() => setEditing(meal.id)} style={{ textAlign: "left" }}>{meal.name}</button>
               )}
               <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <span className="meal-kcal">{fmtK(mt.kcal)} kcal</span>
+                <span className="meal-tot">
+                  <span className="meal-kcal">{fmtK(mt.kcal)} kcal</span>
+                  {meal.items.length > 0 && <MacroLine m={mt} />}
+                </span>
                 {meal.items.length === 0 && (
                   <button className="icon-btn" aria-label={tr(`Изтрий ${meal.name}`, `Delete ${meal.name}`)} onClick={() => actions.editPlan(plan.id, type, (ms) => ms.filter((m) => m.id !== meal.id))}>
                     <Icon name="trash" size={17} />
